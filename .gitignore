@@ -1,0 +1,30 @@
+# Build outputs
+bin/
+out/
+target/
+*.class
+*.jar
+
+# IDE & Editor files
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# Operational server files (if ever tested locally in repo)
+minecraft-server/
+dist/
+
+config.json
+.server_active.lock
+session.lock
+world/
+world_nether/
+world_the_end/
+logs/
+crash-reports/
+cache/
+.stversions/
+.stfolder/

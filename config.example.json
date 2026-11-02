@@ -1,0 +1,16 @@
+{
+  "syncthing": {
+    "api_url": "http://127.0.0.1:8384",
+    "api_key": "YOUR_SYNCTHING_API_KEY",
+    "folder_id": "mc-dorm-server"
+  },
+  "duckdns": {
+    "domain": "dorm-craft",
+    "token": "YOUR_DUCKDNS_TOKEN"
+  },
+  "server": {
+    "java_memory": "6G",
+    "heartbeat_seconds": 120,
+    "stale_timeout_minutes": 10
+  }
+}
