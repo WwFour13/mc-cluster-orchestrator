@@ -14,7 +14,9 @@ echo ========================================================
 set "JAVAC_BIN=javac"
 where javac >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    if exist "C:\Program Files\JetBrains\PyCharm Community Edition 2024.3.2\jbr\bin\javac.exe" (
+    if exist "%LOCALAPPDATA%\Programs\Eclipse Adoptium\jdk-21.0.13.9-hotspot\bin\javac.exe" (
+        set "JAVAC_BIN=%LOCALAPPDATA%\Programs\Eclipse Adoptium\jdk-21.0.13.9-hotspot\bin\javac.exe"
+    ) else if exist "C:\Program Files\JetBrains\PyCharm Community Edition 2024.3.2\jbr\bin\javac.exe" (
         set "JAVAC_BIN=C:\Program Files\JetBrains\PyCharm Community Edition 2024.3.2\jbr\bin\javac.exe"
     ) else (
         echo [ERROR] 'javac' not found on PATH or standard JDK directories.

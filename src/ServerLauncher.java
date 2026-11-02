@@ -107,14 +107,20 @@ public class ServerLauncher {
             // 4. Dynamic Mesh DNS Configuration
             String tailscaleIp = getTailscaleIp();
             if (tailscaleIp == null || tailscaleIp.isEmpty()) {
-                System.err.println("[ERROR] Unable to resolve Tailscale IPv4 interface. Ensure Tailscale is running.");
-                Files.deleteIfExists(lockPath);
-                return;
+                System.out.println("[WARN] Tailscale not detected or not running. Operating in local mode (127.0.0.1).");
+                tailscaleIp = "127.0.0.1";
+            } else {
+                System.out.println("[Mesh] Resolved Tailscale IPv4: " + tailscaleIp);
             }
-            updateDuckDns(duckDomain, duckToken, tailscaleIp);
+
+            if (duckToken != null && !duckToken.isEmpty() && !duckToken.startsWith("YOUR_")) {
+                updateDuckDns(duckDomain, duckToken, tailscaleIp);
+            } else {
+                System.out.println("[DNS] DuckDNS token unconfigured in config.json. Skipping dynamic DNS update.");
+            }
 
             // 5. Pre-Boot State Verification
-            System.out.println("[4/6] Polling Syncthing database for cluster convergence...");
+            System.out.println("[4/6] Checking Syncthing database for cluster convergence...");
             waitForSyncthing(syncthingUrl, syncthingKey, syncthingFid, "Pre-boot sync", 120);
 
             // 6. Asynchronous Heartbeat Dispatcher
@@ -157,16 +163,18 @@ public class ServerLauncher {
             heartbeatScheduler.shutdownNow();
         }
 
-        try {
-            HttpRequest scanReq = HttpRequest.newBuilder()
-                    .uri(URI.create(syncthingUrl + "/rest/db/scan?folder=" + syncthingFid))
-                    .header("X-API-Key", syncthingKey)
-                    .POST(HttpRequest.BodyPublishers.noBody())
-                    .build();
-            HTTP_CLIENT.send(scanReq, HttpResponse.BodyHandlers.discarding());
-        } catch (Exception ignored) {}
+        if (syncthingKey != null && !syncthingKey.isEmpty() && !syncthingKey.startsWith("YOUR_")) {
+            try {
+                HttpRequest scanReq = HttpRequest.newBuilder()
+                        .uri(URI.create(syncthingUrl + "/rest/db/scan?folder=" + syncthingFid))
+                        .header("X-API-Key", syncthingKey)
+                        .POST(HttpRequest.BodyPublishers.noBody())
+                        .build();
+                HTTP_CLIENT.send(scanReq, HttpResponse.BodyHandlers.discarding());
+            } catch (Exception ignored) {}
 
-        waitForSyncthing(syncthingUrl, syncthingKey, syncthingFid, "Outbound sync", 60);
+            waitForSyncthing(syncthingUrl, syncthingKey, syncthingFid, "Outbound sync", 60);
+        }
 
         try {
             Files.deleteIfExists(lockPath);
@@ -226,6 +234,11 @@ public class ServerLauncher {
     }
 
     private static void waitForSyncthing(String url, String key, String fid, String stage, int timeoutSec) {
+        if (url == null || url.isEmpty() || key == null || key.isEmpty() || key.startsWith("YOUR_")) {
+            System.out.printf("[Syncthing] Unconfigured in config.json. Skipping (%s).%n", stage);
+            return;
+        }
+
         System.out.printf("[Syncthing] Monitoring replication state (%s)...%n", stage);
         int elapsed = 0;
         String statusUri = url + "/rest/db/status?folder=" + fid;
@@ -253,7 +266,11 @@ public class ServerLauncher {
                 System.out.printf("[Syncthing] Current State: %s | Inbound Delta: %.2f MB...%n",
                         state, needBytes > 0 ? (needBytes / (1024.0 * 1024.0)) : 0.0);
 
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                if (elapsed == 0) {
+                    System.out.printf("[Syncthing] Daemon not reachable at %s. Skipping replication wait.%n", url);
+                    return;
+                }
                 System.out.println("[Syncthing] Awaiting daemon response...");
             }
 

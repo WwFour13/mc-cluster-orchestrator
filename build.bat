@@ -14,7 +14,9 @@ echo ========================================================
 set "JAVAC_BIN=javac"
 where javac >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    if exist "C:\Program Files\JetBrains\PyCharm Community Edition 2024.3.2\jbr\bin\javac.exe" (
+    if exist "%LOCALAPPDATA%\Programs\Eclipse Adoptium\jdk-21.0.13.9-hotspot\bin\javac.exe" (
+        set "JAVAC_BIN=%LOCALAPPDATA%\Programs\Eclipse Adoptium\jdk-21.0.13.9-hotspot\bin\javac.exe"
+    ) else if exist "C:\Program Files\JetBrains\PyCharm Community Edition 2024.3.2\jbr\bin\javac.exe" (
         set "JAVAC_BIN=C:\Program Files\JetBrains\PyCharm Community Edition 2024.3.2\jbr\bin\javac.exe"
     ) else (
         echo [ERROR] 'javac' compiler not found on PATH or standard JDK directories.
@@ -77,9 +79,9 @@ if exist "%ORCH_DIR%\cluster-guard\build_guard.bat" (
 echo.
 echo ========================================================
 echo [SUCCESS] Full cluster build completed!
-echo - ServerLauncher.jar -> !TARGET_DIR!\ServerLauncher.jar
+echo   [OK] ServerLauncher.jar : !TARGET_DIR!\ServerLauncher.jar
 if exist "!TARGET_DIR!\plugins\ClusterGuard.jar" (
-    echo - ClusterGuard.jar   -> !TARGET_DIR!\plugins\ClusterGuard.jar
+    echo   [OK] ClusterGuard.jar   : !TARGET_DIR!\plugins\ClusterGuard.jar
 )
 echo ========================================================
 ping -n 3 127.0.0.1 >nul 2>&1
