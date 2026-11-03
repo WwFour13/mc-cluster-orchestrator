@@ -39,6 +39,9 @@ public class ServerLauncher {
 
         if (!Files.exists(configPath)) {
             System.err.println("[ERROR] config.json not found in " + rootDir);
+            if (Files.exists(rootDir.resolve("[template]config.json"))) {
+                System.err.println("[TIP] Found '[template]config.json'! Copy it to 'config.json' and add your Syncthing API key.");
+            }
             return;
         }
 

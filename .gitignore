@@ -13,7 +13,7 @@ target/
 .classpath
 .project
 
-# Operational server files (if ever tested locally in repo)
+# Operational server runtime directory (dist / deployment only)
 minecraft-server/
 dist/
 
