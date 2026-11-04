@@ -2,10 +2,10 @@
   "syncthing": {
     "api_url": "http://127.0.0.1:8384",
     "api_key": "YOUR_SYNCTHING_API_KEY",
-    "folder_id": "mc-dorm-server"
+    "folder_id": "mc-server-cluster"
   },
   "duckdns": {
-    "domain": "dorm-craft",
+    "domain": "my-cluster-mc",
     "token": "YOUR_DUCKDNS_TOKEN"
   },
   "server": {
