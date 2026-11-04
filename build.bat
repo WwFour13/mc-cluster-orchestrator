@@ -52,7 +52,7 @@ if %ERRORLEVEL% neq 0 (
 echo [2/3] Packaging ServerLauncher.jar...
 (
     echo Manifest-Version: 1.0
-    echo Main-Class: src.ServerLauncher
+    echo Main-Class: ServerLauncher
     echo.
 ) > "%ORCH_DIR%\build_out\META-INF\MANIFEST.MF"
 
