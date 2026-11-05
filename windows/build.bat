@@ -2,9 +2,8 @@
 setlocal enabledelayedexpansion
 title Build MC Cluster Orchestrator
 
-cd /d "%~dp0"
-set "ORCH_DIR=%~dp0"
-if "%ORCH_DIR:~-1%"=="\" set "ORCH_DIR=%ORCH_DIR:~0,-1%"
+cd /d "%~dp0.."
+set "ORCH_DIR=%cd%"
 
 echo ========================================================
 echo [MC Cluster Orchestrator] Building ServerLauncher...
@@ -27,13 +26,10 @@ if %ERRORLEVEL% neq 0 (
 )
 
 :: 2. Resolve destination directory
-set "TARGET_DIR="
-if exist "%ORCH_DIR%\..\minecraft-server" set "TARGET_DIR=%ORCH_DIR%\..\minecraft-server"
-if exist "%ORCH_DIR%\minecraft-server" set "TARGET_DIR=%ORCH_DIR%\minecraft-server"
-if "!TARGET_DIR!"=="" (
-    echo [INFO] 'minecraft-server' directory not found. Creating it at '%ORCH_DIR%\minecraft-server'...
-    mkdir "%ORCH_DIR%\minecraft-server"
-    set "TARGET_DIR=%ORCH_DIR%\minecraft-server"
+set "TARGET_DIR=%ORCH_DIR%\minecraft-server"
+if not exist "!TARGET_DIR!" (
+    echo [INFO] 'minecraft-server' directory not found. Creating it at '!TARGET_DIR!'...
+    mkdir "!TARGET_DIR!"
 )
 
 :: 3. Compile ServerLauncher.java
@@ -57,7 +53,7 @@ echo [2/3] Packaging ServerLauncher.jar...
     echo.
 ) > "%ORCH_DIR%\build_out\META-INF\MANIFEST.MF"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ORCH_DIR%\package_jar.ps1" -SourceDir "%ORCH_DIR%\build_out" -DestJar "!TARGET_DIR!\ServerLauncher.jar"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ORCH_DIR%\windows\package_jar.ps1" -SourceDir "%ORCH_DIR%\build_out" -DestJar "!TARGET_DIR!\ServerLauncher.jar"
 rd /s /q "%ORCH_DIR%\build_out"
 
 if exist "!TARGET_DIR!\ServerLauncher.jar" (
@@ -83,46 +79,29 @@ if exist "%ORCH_DIR%\templates" (
     echo ========================================================
     echo [MC Cluster Orchestrator] Deploying operational templates...
     echo ========================================================
-    if exist "%ORCH_DIR%\templates\Setup_Desktop_Shortcut.bat" (
-        copy /y "%ORCH_DIR%\templates\Setup_Desktop_Shortcut.bat" "!TARGET_DIR!\Setup_Desktop_Shortcut.bat" >nul
-        echo   [OK] Deployed Setup_Desktop_Shortcut.bat
-    )
-    if exist "%ORCH_DIR%\templates\setup_shortcut.ps1" (
-        copy /y "%ORCH_DIR%\templates\setup_shortcut.ps1" "!TARGET_DIR!\setup_shortcut.ps1" >nul
-        echo   [OK] Deployed setup_shortcut.ps1
-    )
-    if exist "%ORCH_DIR%\templates\Setup_Mac_App.sh" (
-        copy /y "%ORCH_DIR%\templates\Setup_Mac_App.sh" "!TARGET_DIR!\Setup_Mac_App.sh" >nul
-        echo   [OK] Deployed Setup_Mac_App.sh
-    )
+    
+    :: Clean up legacy subdirectories if present
+    if exist "!TARGET_DIR!\windows" rd /s /q "!TARGET_DIR!\windows"
+    if exist "!TARGET_DIR!\mac-linux" rd /s /q "!TARGET_DIR!\mac-linux"
+
+    :: Deploy launchers to root
+    if exist "%ORCH_DIR%\templates\windows\START_SERVER.bat" copy /y "%ORCH_DIR%\templates\windows\START_SERVER.bat" "!TARGET_DIR!\START_SERVER.bat" >nul
+    if exist "%ORCH_DIR%\templates\windows\Setup_Desktop_Shortcut.bat" copy /y "%ORCH_DIR%\templates\windows\Setup_Desktop_Shortcut.bat" "!TARGET_DIR!\Setup_Desktop_Shortcut.bat" >nul
+    if exist "%ORCH_DIR%\templates\mac-linux\START_SERVER.command" copy /y "%ORCH_DIR%\templates\mac-linux\START_SERVER.command" "!TARGET_DIR!\START_SERVER.command" >nul
+    if exist "%ORCH_DIR%\templates\mac-linux\Setup_Mac_App.command" copy /y "%ORCH_DIR%\templates\mac-linux\Setup_Mac_App.command" "!TARGET_DIR!\Setup_Mac_App.command" >nul
+    echo   [OK] Deployed primary launchers (START_SERVER and Shortcut Setups)
+
+    :: Deploy tools/ folder
+    if not exist "!TARGET_DIR!\tools" mkdir "!TARGET_DIR!\tools"
+    if exist "%ORCH_DIR%\templates\windows\tools" copy /y "%ORCH_DIR%\templates\windows\tools\*" "!TARGET_DIR!\tools\" >nul
+    if exist "%ORCH_DIR%\templates\mac-linux\tools" copy /y "%ORCH_DIR%\templates\mac-linux\tools\*" "!TARGET_DIR!\tools\" >nul
+    echo   [OK] Deployed tools\ scripts
+
+    :: Deploy root templates
     if exist "%ORCH_DIR%\templates\icon.ico" (
         if not exist "!TARGET_DIR!\bin" mkdir "!TARGET_DIR!\bin"
         copy /y "%ORCH_DIR%\templates\icon.ico" "!TARGET_DIR!\bin\icon.ico" >nul
         echo   [OK] Deployed bin\icon.ico
-    )
-    if exist "%ORCH_DIR%\templates\run_server.bat" (
-        copy /y "%ORCH_DIR%\templates\run_server.bat" "!TARGET_DIR!\run_server.bat" >nul
-        echo   [OK] Deployed run_server.bat (Windows)
-    )
-    if exist "%ORCH_DIR%\templates\run_server.sh" (
-        copy /y "%ORCH_DIR%\templates\run_server.sh" "!TARGET_DIR!\run_server.sh" >nul
-        echo   [OK] Deployed run_server.sh (Linux/macOS)
-    )
-    if exist "%ORCH_DIR%\templates\sync_pull.bat" (
-        copy /y "%ORCH_DIR%\templates\sync_pull.bat" "!TARGET_DIR!\sync_pull.bat" >nul
-        echo   [OK] Deployed sync_pull.bat
-    )
-    if exist "%ORCH_DIR%\templates\sync_push.bat" (
-        copy /y "%ORCH_DIR%\templates\sync_push.bat" "!TARGET_DIR!\sync_push.bat" >nul
-        echo   [OK] Deployed sync_push.bat
-    )
-    if exist "%ORCH_DIR%\templates\sync_pull.sh" (
-        copy /y "%ORCH_DIR%\templates\sync_pull.sh" "!TARGET_DIR!\sync_pull.sh" >nul
-        echo   [OK] Deployed sync_pull.sh
-    )
-    if exist "%ORCH_DIR%\templates\sync_push.sh" (
-        copy /y "%ORCH_DIR%\templates\sync_push.sh" "!TARGET_DIR!\sync_push.sh" >nul
-        echo   [OK] Deployed sync_push.sh
     )
     if exist "%ORCH_DIR%\templates\rclone-filter.txt" (
         copy /y "%ORCH_DIR%\templates\rclone-filter.txt" "!TARGET_DIR!\rclone-filter.txt" >nul
@@ -150,4 +129,4 @@ if exist "!TARGET_DIR!\plugins\ClusterGuard.jar" (
     echo   [OK] ClusterGuard.jar   : !TARGET_DIR!\plugins\ClusterGuard.jar
 )
 echo ========================================================
-ping -n 3 127.0.0.1 >nul 2>&1
+

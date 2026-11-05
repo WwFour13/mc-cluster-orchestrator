@@ -28,3 +28,4 @@ Get-ChildItem -Path $resolvedSource -Recurse -File | ForEach-Object {
 $zip.Dispose()
 $finalSize = (Get-Item $DestJar).Length
 Write-Host "Packaged $DestJar successfully. Size: $finalSize bytes"
+

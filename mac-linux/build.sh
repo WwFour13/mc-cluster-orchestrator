@@ -1,21 +1,16 @@
 #!/usr/bin/env bash
 set -e
-ORCH_DIR="$(cd "$(dirname "$0")" && pwd)"
+ORCH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "========================================================"
 echo "[MC Cluster Orchestrator] Building ServerLauncher..."
 echo "========================================================"
 
 # 1. Resolve destination directory
-TARGET_DIR=""
-if [ -d "$ORCH_DIR/../minecraft-server" ]; then
-    TARGET_DIR="$ORCH_DIR/../minecraft-server"
-elif [ -d "$ORCH_DIR/minecraft-server" ]; then
-    TARGET_DIR="$ORCH_DIR/minecraft-server"
-else
-    echo "[INFO] 'minecraft-server' directory not found. Creating it at '$ORCH_DIR/minecraft-server'..."
-    mkdir -p "$ORCH_DIR/minecraft-server"
-    TARGET_DIR="$ORCH_DIR/minecraft-server"
+TARGET_DIR="$ORCH_DIR/minecraft-server"
+if [ ! -d "$TARGET_DIR" ]; then
+    echo "[INFO] 'minecraft-server' directory not found. Creating it at '$TARGET_DIR'..."
+    mkdir -p "$TARGET_DIR"
 fi
 
 # 2. Compile ServerLauncher.java
@@ -43,7 +38,7 @@ else
     exit 1
 fi
 
-# 4. Trigger ClusterGuard build
+# 4. Trigger ClusterGuard build if present
 if [ -f "$ORCH_DIR/cluster-guard/build_guard.sh" ]; then
     echo ""
     echo "========================================================"
@@ -52,56 +47,35 @@ if [ -f "$ORCH_DIR/cluster-guard/build_guard.sh" ]; then
     bash "$ORCH_DIR/cluster-guard/build_guard.sh"
 fi
 
-# 5. Auto-provision operational templates
+# 5. Auto-provision operational templates into deployment folder
 if [ -d "$ORCH_DIR/templates" ]; then
     echo ""
     echo "========================================================"
     echo "[MC Cluster Orchestrator] Deploying operational templates..."
     echo "========================================================"
-    if [ -f "$ORCH_DIR/templates/Setup_Desktop_Shortcut.bat" ]; then
-        cp -f "$ORCH_DIR/templates/Setup_Desktop_Shortcut.bat" "$TARGET_DIR/Setup_Desktop_Shortcut.bat"
-        echo "  [OK] Deployed Setup_Desktop_Shortcut.bat"
-    fi
-    if [ -f "$ORCH_DIR/templates/setup_shortcut.ps1" ]; then
-        cp -f "$ORCH_DIR/templates/setup_shortcut.ps1" "$TARGET_DIR/setup_shortcut.ps1"
-        echo "  [OK] Deployed setup_shortcut.ps1"
-    fi
-    if [ -f "$ORCH_DIR/templates/Setup_Mac_App.sh" ]; then
-        cp -f "$ORCH_DIR/templates/Setup_Mac_App.sh" "$TARGET_DIR/Setup_Mac_App.sh"
-        chmod +x "$TARGET_DIR/Setup_Mac_App.sh" 2>/dev/null || true
-        echo "  [OK] Deployed Setup_Mac_App.sh"
-    fi
+
+    # Clean up legacy subdirectories if present
+    rm -rf "$TARGET_DIR/windows" "$TARGET_DIR/mac-linux"
+
+    # Deploy primary launchers to root
+    [ -f "$ORCH_DIR/templates/windows/START_SERVER.bat" ] && cp -f "$ORCH_DIR/templates/windows/START_SERVER.bat" "$TARGET_DIR/START_SERVER.bat"
+    [ -f "$ORCH_DIR/templates/windows/Setup_Desktop_Shortcut.bat" ] && cp -f "$ORCH_DIR/templates/windows/Setup_Desktop_Shortcut.bat" "$TARGET_DIR/Setup_Desktop_Shortcut.bat"
+    [ -f "$ORCH_DIR/templates/mac-linux/START_SERVER.command" ] && cp -f "$ORCH_DIR/templates/mac-linux/START_SERVER.command" "$TARGET_DIR/START_SERVER.command" && chmod +x "$TARGET_DIR/START_SERVER.command"
+    [ -f "$ORCH_DIR/templates/mac-linux/Setup_Mac_App.command" ] && cp -f "$ORCH_DIR/templates/mac-linux/Setup_Mac_App.command" "$TARGET_DIR/Setup_Mac_App.command" && chmod +x "$TARGET_DIR/Setup_Mac_App.command"
+    echo "  [OK] Deployed primary launchers (START_SERVER and Shortcut Setups)"
+
+    # Deploy tools/ folder
+    mkdir -p "$TARGET_DIR/tools"
+    [ -d "$ORCH_DIR/templates/windows/tools" ] && cp -f "$ORCH_DIR/templates/windows/tools/"* "$TARGET_DIR/tools/" 2>/dev/null || true
+    [ -d "$ORCH_DIR/templates/mac-linux/tools" ] && cp -f "$ORCH_DIR/templates/mac-linux/tools/"* "$TARGET_DIR/tools/" 2>/dev/null || true
+    chmod +x "$TARGET_DIR/tools/"*.command 2>/dev/null || true
+    echo "  [OK] Deployed tools/ scripts"
+
+    # Deploy root templates
     if [ -f "$ORCH_DIR/templates/icon.ico" ]; then
         mkdir -p "$TARGET_DIR/bin"
         cp -f "$ORCH_DIR/templates/icon.ico" "$TARGET_DIR/bin/icon.ico"
         echo "  [OK] Deployed bin/icon.ico"
-    fi
-    if [ -f "$ORCH_DIR/templates/run_server.sh" ]; then
-        cp -f "$ORCH_DIR/templates/run_server.sh" "$TARGET_DIR/run_server.sh"
-        chmod +x "$TARGET_DIR/run_server.sh" 2>/dev/null || true
-        echo "  [OK] Deployed run_server.sh (Linux/macOS)"
-    fi
-    if [ -f "$ORCH_DIR/templates/run_server.bat" ]; then
-        cp -f "$ORCH_DIR/templates/run_server.bat" "$TARGET_DIR/run_server.bat"
-        echo "  [OK] Deployed run_server.bat (Windows)"
-    fi
-    if [ -f "$ORCH_DIR/templates/sync_pull.sh" ]; then
-        cp -f "$ORCH_DIR/templates/sync_pull.sh" "$TARGET_DIR/sync_pull.sh"
-        chmod +x "$TARGET_DIR/sync_pull.sh" 2>/dev/null || true
-        echo "  [OK] Deployed sync_pull.sh"
-    fi
-    if [ -f "$ORCH_DIR/templates/sync_push.sh" ]; then
-        cp -f "$ORCH_DIR/templates/sync_push.sh" "$TARGET_DIR/sync_push.sh"
-        chmod +x "$TARGET_DIR/sync_push.sh" 2>/dev/null || true
-        echo "  [OK] Deployed sync_push.sh"
-    fi
-    if [ -f "$ORCH_DIR/templates/sync_pull.bat" ]; then
-        cp -f "$ORCH_DIR/templates/sync_pull.bat" "$TARGET_DIR/sync_pull.bat"
-        echo "  [OK] Deployed sync_pull.bat"
-    fi
-    if [ -f "$ORCH_DIR/templates/sync_push.bat" ]; then
-        cp -f "$ORCH_DIR/templates/sync_push.bat" "$TARGET_DIR/sync_push.bat"
-        echo "  [OK] Deployed sync_push.bat"
     fi
     if [ -f "$ORCH_DIR/templates/rclone-filter.txt" ]; then
         cp -f "$ORCH_DIR/templates/rclone-filter.txt" "$TARGET_DIR/rclone-filter.txt"

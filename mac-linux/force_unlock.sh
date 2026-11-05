@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "[Emergency Unlock] Attempting cloud and local unlock..."
 if [ -f "minecraft-server/ServerLauncher.jar" ]; then
@@ -11,3 +11,4 @@ else
     rm -f "minecraft-server/.server_active.lock" ".server_active.lock"
     echo "[OK] Local locks cleared."
 fi
+

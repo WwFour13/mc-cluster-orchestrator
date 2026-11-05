@@ -9,7 +9,7 @@
 - /.stversions/**
 - /.stfolder/**
 
-# Exclude local credentials, locks, syncthing metadata, and scripts
+# Exclude local credentials, locks, metadata, and scripts
 - config.json
 - [template]config.json
 - *.template.json
@@ -19,9 +19,15 @@
 - cluster.lock
 - session.lock
 - **/session.lock
+- remote_stop.signal
 - *.bat
 - *.sh
+- *.command
+- *.ps1
 - *.jar
+- /tools/**
+- /windows/**
+- /mac-linux/**
 - rclone-filter.txt
 
 # Include everything else (world, plugins, configs, manifest.json)

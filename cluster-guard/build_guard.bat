@@ -72,7 +72,9 @@ if "!PLUGINS_DEST!"=="" (
 )
 
 echo [3/3] Packaging and deploying ClusterGuard.jar...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%GUARD_DIR%\..\package_jar.ps1" -SourceDir "%GUARD_DIR%\target-build" -DestJar "!PLUGINS_DEST!\ClusterGuard.jar"
+set "PKG_PS1=%GUARD_DIR%\..\windows\package_jar.ps1"
+if not exist "!PKG_PS1!" set "PKG_PS1=%GUARD_DIR%\..\package_jar.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "!PKG_PS1!" -SourceDir "%GUARD_DIR%\target-build" -DestJar "!PLUGINS_DEST!\ClusterGuard.jar"
 rd /s /q "%GUARD_DIR%\target-build"
 
 echo [SUCCESS] ClusterGuard plugin built and deployed to !PLUGINS_DEST!\ClusterGuard.jar

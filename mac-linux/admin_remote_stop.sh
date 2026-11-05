@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "========================================================"
 echo " MC Cluster - Admin Remote Server Stop"
@@ -17,6 +17,7 @@ if [ -f "minecraft-server/ServerLauncher.jar" ]; then
 elif [ -f "ServerLauncher.jar" ]; then
     java -jar "ServerLauncher.jar" remote-stop "$REASON"
 else
-    echo "[ERROR] ServerLauncher.jar not found! Run ./build.sh first."
+    echo "[ERROR] ServerLauncher.jar not found! Run mac-linux/build.sh first."
     exit 1
 fi
+

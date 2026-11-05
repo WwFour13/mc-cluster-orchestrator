@@ -32,10 +32,11 @@ EOF
 
 cat << EOF > "$APP_DIR/Contents/MacOS/run.sh"
 #!/usr/bin/env bash
-osascript -e 'tell application "Terminal" to do script "cd \"$SERVER_DIR\" && ./run_server.sh"'
+osascript -e "tell application \"Terminal\" to do script \"cd \\\"$SERVER_DIR\\\" && ./START_SERVER.command\""
 EOF
 
 chmod +x "$APP_DIR/Contents/MacOS/run.sh"
+chmod +x "$SERVER_DIR/START_SERVER.command"
 
 echo ""
 echo "========================================================"
@@ -46,3 +47,4 @@ echo " 1. Desktop: Double-click 'Minecraft Cluster Server' on your Desktop."
 echo " 2. Dock:    Drag 'Minecraft Cluster Server.app' into your Mac Dock to pin it!"
 echo " 3. Search:  Press Cmd+Space and type 'Minecraft Cluster' to launch anytime."
 echo ""
+

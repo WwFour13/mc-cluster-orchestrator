@@ -1,6 +1,6 @@
 # MC Cluster Orchestrator
 
-A lightweight, distributed Minecraft server orchestrator. Coordinates active hosting across multiple personal machines without expensive 24/7 dedicated cloud hosting, while preventing world desync and split-brain corruption using **Backblaze B2** (Cloud Hub) or **Syncthing** (P2P Mesh).
+A lightweight, distributed Minecraft server orchestrator. Coordinates active hosting across multiple personal machines without expensive 24/7 dedicated cloud hosting, while preventing world desync and split-brain corruption using **Backblaze B2** (Cloud Hub).
 
 ---
 
@@ -8,10 +8,14 @@ A lightweight, distributed Minecraft server orchestrator. Coordinates active hos
 
 - **Zero-Friction Player Access:** Players connect via standard vanilla Minecraft to a single, static address (e.g. `your-cluster.ply.gg`). No client VPNs, Hamachi, or third-party software are required for players.
 - **Cross-Platform Support:** Orchestrator and fail-safe components run natively across **Windows, macOS, and Linux**.
+- **Tailored OS Packs (Zero Clutter for Friends):** Windows friends get `cohost-windows.zip` (only `.bat` files and Windows binaries; zero Mac files). Mac friends get `cohost-mac.zip` (native double-clickable `.command` scripts; zero Windows `.bat` or `.exe` files).
+- **1-Click Desktop & App Buttons:**
+  - **Windows:** Double-click `Setup_Desktop_Shortcut.bat` to create a Desktop icon and register "Minecraft Cluster Server" in Windows search (and pin to taskbar).
+  - **macOS:** Double-click `Setup_Mac_App.command` to generate a native `Minecraft Cluster Server.app` on the Desktop and Dock.
 - **Asynchronous Cloud Sync (No Machine Overlap Needed):** Uses a free Backblaze B2 bucket (10 GB free) so hosts do not need to be online at the same time to pass the world. Host A can upload and turn off their PC; Host B can wake up hours later, pull the latest world, and host.
-- **Zero Background Daemons:** No programs (like Syncthing) need to run in the background 24/7. Rclone only executes when starting, stopping, or running scheduled autosaves.
+- **Zero Background Daemons:** No programs run in the background 24/7. Rclone only executes when starting, stopping, or running scheduled autosaves.
 - **Optimistic Concurrency Control (OCC):** Every session is tagged with a sequential Generation Number (`manifest.json`). Stale hosts are physically blocked from pushing old worlds over newer cloud progress.
-- **Premature Pull Protection:** `sync_pull` automatically detects if another host is currently playing and aborts to prevent downloading incomplete, mid-game chunk sectors.
+- **Premature Pull Protection:** Inbound sync automatically detects if another host is currently playing and aborts to prevent downloading incomplete, mid-game chunk sectors.
 - **Mid-Game Crash Safety:** Flushes dirty chunks (`save-all flush`) and runs incremental snapshot uploads to Backblaze B2 every 15 minutes during gameplay. If a host's computer dies, at most 15 minutes of progress is lost.
 - **Fail-Safe Rollback (30-Day Versioning):** Backblaze B2 natively keeps previous revisions of chunk files for 30 days for free, making accidental corruption or player griefing instantly reversible.
 - **Bypasses Strict CGNAT, Campus & Double-NAT Firewalls:** Solves institutional networks, university Wi-Fi restrictions, double-NAT, and AP client isolation using dedicated Anycast tunneling via Playit.gg.
@@ -23,10 +27,10 @@ A lightweight, distributed Minecraft server orchestrator. Coordinates active hos
 | Safety Guard | How It Works |
 | :--- | :--- |
 | **Distributed Cloud Lock** | Coordinates the active host via `cluster.lock` in Backblaze B2. If a co-host tries to start while someone is hosting, boot is safely aborted. |
-| **Premature Pull Guard** | `sync_pull` checks `cluster.lock` and refuses to download if someone is currently hosting, preventing partial or torn writes. |
+| **Premature Pull Guard** | Inbound pull checks `cluster.lock` and refuses to download if someone is currently hosting, preventing partial or torn writes. |
 | **Generation Sequence Guard** | Tracks `generation: #N` in `manifest.json`. If a co-host with an outdated local world attempts to push, the push is hard-rejected until they pull. |
 | **`--update` Timestamp Guard** | Rclone strictly skips files on the cloud that have newer timestamps than the local files being uploaded. |
-| **Heartbeat & Stale Reclaim** | The active host updates the lock timestamp every 120s. If a host's machine loses power, the lock auto-expires after 10 minutes so other co-hosts are not trapped. |
+| **Heartbeat & Stale Reclaim** | The active host updates the lock timestamp periodically. If a host's machine loses power, the lock auto-expires after 10 minutes so other co-hosts are not trapped. |
 | **In-Game Incremental Push** | Every 15 minutes, Paper runs `save-all flush` and uploads an incremental delta of modified `.mca` region files in the background without lag. |
 | **ClusterGuard Fail-Safe Plugin** | A custom Paper/Spigot Java plugin that prevents direct JAR launches that bypass cluster orchestration. |
 
@@ -39,32 +43,56 @@ mc-cluster-orchestrator/            <-- [DEV / GIT REPO]
 ├── .gitignore
 ├── pom.xml
 ├── README.md
-├── build.bat                       <-- Compiles & auto-deploys (Windows)
-├── build.sh                        <-- Compiles & auto-deploys (Linux/macOS)
-├── force_unlock.bat                <-- Admin emergency lock release (Windows Batch)
-├── force_unlock.sh                 <-- Admin emergency lock release (Linux/macOS Bash)
-├── unlock.ps1                      <-- Admin emergency lock release (PowerShell)
+├── windows/                        <-- Admin scripts for Windows
+│   ├── build.bat                   <-- Compiles orchestrator & deploys templates
+│   ├── package_jar.ps1             <-- Jar packaging helper
+│   ├── create_cohost_pack.bat      <-- Generates cohost-windows.zip and cohost-mac.zip
+│   ├── package_cohost_pack.ps1     <-- Cohost zip packaging logic
+│   ├── admin_remote_stop.bat       <-- Signals remote shutdown via Backblaze B2
+│   ├── force_unlock.bat            <-- Emergency lock release launcher
+│   └── unlock.ps1                  <-- Emergency cloud/local lock clearer
+├── mac-linux/                      <-- Admin scripts for Linux/macOS
+│   ├── build.sh                    <-- Compiles orchestrator & deploys templates
+│   ├── create_cohost_pack.sh       <-- Generates cohost-windows.zip and cohost-mac.zip
+│   ├── admin_remote_stop.sh        <-- Signals remote shutdown via Backblaze B2
+│   └── force_unlock.sh             <-- Emergency lock release launcher
 ├── src/
 │   └── ServerLauncher.java         <-- Orchestrator, cloud lock manager, and sync engine
 ├── cluster-guard/                  <-- Safe-launch fail-safe plugin source
 └── templates/                      <-- Operational templates deployed to server folder
     ├── rclone-filter.txt           <-- Cloud sync filter rules
     ├── config.example.json         <-- Cluster configuration template
-    ├── run_server.bat              <-- Host startup script (Windows)
-    ├── run_server.sh               <-- Host startup script (Linux/macOS)
-    ├── sync_pull.bat / .sh         <-- Manual inbound sync script
-    └── sync_push.bat / .sh         <-- Manual outbound sync script
+    ├── icon.ico                    <-- Cluster desktop and shortcut icon
+    ├── windows/                    <-- Windows operational templates
+    │   ├── START_SERVER.bat
+    │   ├── Setup_Desktop_Shortcut.bat
+    │   └── tools/
+    │       ├── setup_shortcut.ps1
+    │       ├── sync_pull.bat
+    │       └── sync_push.bat
+    └── mac-linux/                  <-- macOS/Linux operational templates
+        ├── START_SERVER.command
+        ├── Setup_Mac_App.command
+        └── tools/
+            ├── sync_pull.command
+            └── sync_push.command
 
 minecraft-server/                   <-- [SERVER RUNTIME - EXCLUDED FROM GIT]
+├── START_SERVER.bat                <-- Primary Windows launcher
+├── START_SERVER.command            <-- Primary macOS launcher (double-clickable)
+├── Setup_Desktop_Shortcut.bat      <-- Optional Windows 1-click shortcut setup
+├── Setup_Mac_App.command           <-- Optional macOS 1-click .app setup
 ├── config.json                     <-- Local credentials (b2_bucket, key_id, application_key)
 ├── rclone-filter.txt               <-- Excludes local binaries, cache, logs, and credentials
-├── run_server.bat / .sh            <-- Main launcher
-├── sync_pull.bat / .sh             <-- Pulls newest world from Backblaze B2
-├── sync_push.bat / .sh             <-- Pushes world to Backblaze B2 (with generation check)
 ├── ServerLauncher.jar              <-- Built orchestrator binary
 ├── bin/
 │   ├── core.dat                    <-- Paper server JAR renamed to core.dat
+│   ├── icon.ico                    <-- Server icon
 │   └── rclone.exe                  <-- Rclone standalone binary (Windows)
+├── tools/                          <-- Manual & advanced utilities
+│   ├── setup_shortcut.ps1          <-- Helper for Desktop shortcut creation
+│   ├── sync_pull.bat / .command    <-- Pulls newest world from Backblaze B2
+│   └── sync_push.bat / .command    <-- Pushes world to Backblaze B2
 ├── plugins/
 │   ├── ClusterGuard.jar            <-- Safe-launch protection plugin
 │   └── playit-minecraft-plugin.jar <-- High-speed Anycast tunnel plugin
@@ -93,8 +121,8 @@ minecraft-server/                   <-- [SERVER RUNTIME - EXCLUDED FROM GIT]
 
 ### 3. Build & Deploy
 From `mc-cluster-orchestrator`:
-- **Windows:** Run `build.bat`
-- **Linux / macOS:** Run `./build.sh`
+- **Windows:** Run `windows\build.bat`
+- **Linux / macOS:** Run `./mac-linux/build.sh`
 
 ### 4. Configure `minecraft-server/config.json`
 Fill in your Backblaze credentials:
@@ -115,15 +143,17 @@ Fill in your Backblaze credentials:
 
 ### 5. Push the World to the Cloud
 Seed the cloud with your current world and server settings:
-- **Windows:** Double-click `minecraft-server/sync_push.bat` (or run `java -jar minecraft-server/ServerLauncher.jar push`).
-- **Linux / macOS:** Run `./minecraft-server/sync_push.sh`.
+- **Windows:** Double-click `minecraft-server\tools\sync_push.bat` (or run `java -jar minecraft-server/ServerLauncher.jar push`).
+- **Linux / macOS:** Run `./minecraft-server/tools/sync_push.command`.
 
-### 6. Package the Co-Host Starter Pack
-Generate a ready-to-send, pre-configured zip file for your co-hosts:
-- **Windows:** Double-click `create_cohost_pack.bat` in the repository root.
-- **Linux / macOS:** Run `./create_cohost_pack.sh`.
+### 6. Package the Co-Host Starter Packs
+Generate ready-to-send, pre-configured zip files for your co-hosts:
+- **Windows:** Double-click `windows\create_cohost_pack.bat`.
+- **Linux / macOS:** Run `./mac-linux/create_cohost_pack.sh`.
 
-This creates **`cohost-starter-pack.zip`** (~80 MB) containing all binaries, scripts, and pre-configured keys. Send this zip to your co-hosts (via Discord, Google Drive, etc.).
+This automatically generates two separate, tailored zip files at the repository root:
+1. **`cohost-windows.zip` (~83 MB):** Tailored for Windows users. Contains only `.bat` launchers and Windows binaries.
+2. **`cohost-mac.zip` (~55 MB):** Tailored for macOS/Linux users. Contains native double-clickable `.command` launchers with auto-download for macOS rclone.
 
 ---
 
@@ -131,20 +161,27 @@ This creates **`cohost-starter-pack.zip`** (~80 MB) containing all binaries, scr
 
 Co-hosts **do not** need Git, do not need to register for Backblaze, and do not compile any code. Everything is pre-assembled for them.
 
-1. **Extract the Starter Pack:** Extract the `cohost-starter-pack.zip` sent by the Cluster Admin to any folder (e.g. `C:\minecraft-server\` or `~/minecraft-server`).
-2. **Install Java 21:** [Adoptium Temurin 21](https://adoptium.net/temurin/releases/?version=21) (Windows, macOS, or Linux).
-3. **Run the Server:**
-   - **Windows:** Double-click **`run_server.bat`**.
-   - **Linux / macOS:** Run `chmod +x *.sh && ./run_server.sh`.
-   - *Everything (`config.json` with cloud keys, `rclone.exe`, Paper core, and Playit tunnel credentials) is already configured.*
-   - On the first launch, the orchestrator connects to Backblaze B2, downloads the newest world, verifies generation, and starts hosting!
+1. **Extract the Starter Pack:**
+   - **Windows Friends:** Extract `cohost-windows.zip`.
+   - **Mac Friends:** Extract `cohost-mac.zip`.
+2. **Install Java 21:** [Adoptium Temurin 21](https://adoptium.net/temurin/releases/?version=21).
+3. **Run or Install 1-Click Launchers:**
+   - **Windows:**
+     - **Option A (Desktop Button):** Double-click **`Setup_Desktop_Shortcut.bat`**. This creates a Desktop shortcut and registers "Minecraft Cluster Server" in Windows search.
+     - **Option B (Direct Run):** Double-click **`START_SERVER.bat`**.
+   - **macOS:**
+     - **Option A (Desktop App):** Double-click **`Setup_Mac_App.command`** to create `Minecraft Cluster Server.app` on your Desktop (which can be pinned to your Dock).
+     - **Option B (Direct Run):** Double-click **`START_SERVER.command`** in Finder (runs in Terminal automatically).
+
+*Everything (`config.json` with cloud keys, Paper core, and Playit tunnel credentials) is already configured.*
+On the first launch, the orchestrator connects to Backblaze B2, downloads the newest world, verifies generation, and starts hosting!
 
 ---
 
 ## Operating the Cluster
 
 ### Starting the Server
-Run `run_server.bat` (Windows) or `./run_server.sh` (Linux/macOS):
+Run `START_SERVER.bat` (Windows) or double-click `START_SERVER.command` (macOS):
 1. Verifies port `25565` is available.
 2. Checks cloud lock in Backblaze B2. If another co-host is active, it aborts.
 3. Acquires cloud lock.
@@ -170,8 +207,8 @@ The server will save all data, notify players, and trigger the orchestrator's cl
 
 #### 3. Admin Remote Stop (Zero-Friction Takeover)
 If an admin needs to stop a co-host's running server remotely without opening Minecraft:
-- **Windows:** Double-click **`admin_remote_stop.bat`** in the repository root.
-- **Linux / macOS:** Run **`./admin_remote_stop.sh`**.
+- **Windows:** Double-click **`windows\admin_remote_stop.bat`**.
+- **Linux / macOS:** Run **`./mac-linux/admin_remote_stop.sh`**.
 
 **How it works:**
 1. The script prompts for an optional reason (e.g. *"Admin taking over hosting"*).
@@ -185,14 +222,7 @@ If an admin needs to stop a co-host's running server remotely without opening Mi
    ```
 5. It flushes all chunks (`save-all flush`), stops Paper, syncs the final world state to Backblaze B2, and releases the cluster lock. Zero player progress is lost.
 
-### Packaging & Distributing to Co-Hosts
-As the admin, you can generate a complete, 1-click starter zip for your co-hosts anytime:
-- **Windows:** Double-click `create_cohost_pack.bat`.
-- **Linux / macOS:** Run `./create_cohost_pack.sh`.
-
-This generates `cohost-starter-pack.zip` (~80 MB) at the repository root. Send this zip to your co-hosts (via Discord, Google Drive, etc.). It includes the pre-configured `config.json`, `rclone.exe`, server core, Playit tunnel credentials, and launch scripts. When they unzip it and click `run_server.bat`, it downloads the latest world from Backblaze B2 and boots immediately.
-
-### Manual Sync Scripts
-- **`sync_pull.bat` / `.sh`:** Pulls the newest world without starting the server. (Blocked if another host is active).
-- **`sync_push.bat` / `.sh`:** Pushes local changes to the cloud. (Blocked if cloud has newer generation or is locked).
-- **`force_unlock.bat` / `.sh`:** Admin tool to clear stuck cloud and local locks if a host machine crashes.
+### Manual Utilities (`tools/` folder)
+- **`tools/sync_pull.bat` / `.command`:** Pulls the newest world without starting the server. (Blocked if another host is active).
+- **`tools/sync_push.bat` / `.command`:** Pushes local changes to the cloud. (Blocked if cloud has newer generation or is locked).
+- **`windows\force_unlock.bat` / `mac-linux/force_unlock.sh`:** Admin tool to clear stuck cloud and local locks if a host machine crashes.
