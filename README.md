@@ -152,12 +152,38 @@ Run `run_server.bat` (Windows) or `./run_server.sh` (Linux/macOS):
 5. Launches Paper server with live keyboard forwarding.
 6. Auto-saves and pushes incremental chunk snapshots every 15 minutes.
 
-### Stopping the Server
-In the server terminal window, type:
+### Stopping the Server (3 Ways)
+
+#### 1. Local Host Console
+In the server terminal window, the running host can simply type:
 ```text
 stop
 ```
-The orchestrator intercepts the exit, cleanly flushes Paper to disk, uploads the final state with `--update`, increments the Generation Number, and releases the cloud lock.
+The orchestrator intercepts the command, cleanly flushes Paper to disk, uploads the final state with `--update`, increments the Generation Number, and releases the cloud lock.
+
+#### 2. In-Game OP Command
+Any operator playing on the server can type:
+```text
+/stop
+```
+The server will save all data, notify players, and trigger the orchestrator's cloud upload and unlock routine automatically.
+
+#### 3. Admin Remote Stop (Zero-Friction Takeover)
+If an admin needs to stop a co-host's running server remotely without opening Minecraft:
+- **Windows:** Double-click **`admin_remote_stop.bat`** in the repository root.
+- **Linux / macOS:** Run **`./admin_remote_stop.sh`**.
+
+**How it works:**
+1. The script prompts for an optional reason (e.g. *"Admin taking over hosting"*).
+2. It writes a `remote_stop.signal` into Backblaze B2.
+3. Within 30 seconds, the running host's launcher detects the signal.
+4. It broadcasts a polite countdown to online players:
+   ```text
+   [CLUSTER] Remote server stop requested by Admin.
+   [CLUSTER] Reason: Admin taking over hosting
+   [CLUSTER] Server will save and shut down in 30 seconds...
+   ```
+5. It flushes all chunks (`save-all flush`), stops Paper, syncs the final world state to Backblaze B2, and releases the cluster lock. Zero player progress is lost.
 
 ### Packaging & Distributing to Co-Hosts
 As the admin, you can generate a complete, 1-click starter zip for your co-hosts anytime:

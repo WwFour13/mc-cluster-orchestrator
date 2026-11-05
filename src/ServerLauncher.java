@@ -5,7 +5,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.*;
 
 public class ServerLauncher {
@@ -18,6 +20,7 @@ public class ServerLauncher {
     private static volatile boolean isShuttingDown = false;
     private static Process activeMcProcess = null;
     private static BufferedWriter activeMcStdin = null;
+    private static final AtomicBoolean remoteStopTriggered = new AtomicBoolean(false);
 
     private static record CommandResult(int exitCode, String stdout, String stderr) {}
 
@@ -89,8 +92,26 @@ public class ServerLauncher {
                         Files.deleteIfExists(lockPath);
                         if (hasB2) {
                             releaseCloudLock(rootDir, rclone, b2Target);
+                            cancelRemoteStop(rootDir, rclone, b2Target);
                         }
                         System.out.println("[UNLOCK] Emergency cluster unlock complete.");
+                        return;
+
+                    case "remote-stop":
+                        if (!hasB2) {
+                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
+                            return;
+                        }
+                        String reason = (args.length > 1) ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)) : "Admin maintenance";
+                        dispatchRemoteStop(rootDir, rclone, b2Target, localHost, reason);
+                        return;
+
+                    case "cancel-stop":
+                        if (!hasB2) {
+                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
+                            return;
+                        }
+                        cancelRemoteStop(rootDir, rclone, b2Target);
                         return;
 
                     case "status":
@@ -101,6 +122,12 @@ public class ServerLauncher {
                                 System.out.println("Active Cloud Lock: " + catRes.stdout);
                             } else {
                                 System.out.println("Cloud Lock: FREE (No active host)");
+                            }
+                            CommandResult signalRes = runCommand(rootDir, rclone, "cat", b2Target + "/remote_stop.signal");
+                            if (signalRes.exitCode == 0 && !signalRes.stdout.isEmpty()) {
+                                System.out.println("Pending Remote Stop: " + signalRes.stdout);
+                            } else {
+                                System.out.println("Pending Remote Stop: None");
                             }
                             int cloudGen = readCloudGeneration(rootDir, rclone, b2Target);
                             int localGen = readLocalGeneration(rootDir);
@@ -114,7 +141,7 @@ public class ServerLauncher {
                         return;
 
                     default:
-                        System.err.println("[ERROR] Unknown argument: " + cmd + " (Available: pull, push, unlock, status)");
+                        System.err.println("[ERROR] Unknown argument: " + cmd + " (Available: pull, push, unlock, status, remote-stop, cancel-stop)");
                         return;
                 }
             }
@@ -140,6 +167,8 @@ public class ServerLauncher {
                 if (!acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
                     return;
                 }
+                // Clear any leftover stop signal from previous sessions
+                cancelRemoteStop(rootDir, rclone, b2Target);
             } else {
                 if (Files.exists(lockPath)) {
                     String lockContent = Files.readString(lockPath);
@@ -198,18 +227,19 @@ public class ServerLauncher {
                 System.out.println("[4/6] No cloud sync provider configured. Running in local standalone mode.");
             }
 
-            // 5. Asynchronous Heartbeat & Periodic In-Game Autosave Dispatcher
-            heartbeatScheduler = Executors.newSingleThreadScheduledExecutor();
+            // 5. Asynchronous Heartbeat, Remote Stop Poller, & In-Game Autosave Dispatcher
+            heartbeatScheduler = Executors.newScheduledThreadPool(2);
 
-            // Heartbeat timer (every heartbeatSec)
+            // Heartbeat & Remote Stop Poller (every 30 seconds)
             heartbeatScheduler.scheduleAtFixedRate(() -> {
                 try {
                     writeLockFile(lockPath, localHost);
                     if (hasB2) {
                         writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
+                        checkRemoteStopSignal(rootDir, rclone, b2Target, activeMcStdin);
                     }
                 } catch (Exception ignored) {}
-            }, heartbeatSec, heartbeatSec, TimeUnit.SECONDS);
+            }, 15, 30, TimeUnit.SECONDS);
 
             // In-Game Autosave & Incremental Cloud Push (every saveIntervalMin)
             if (hasB2 && saveIntervalMin > 0) {
@@ -296,6 +326,7 @@ public class ServerLauncher {
             System.out.println("[B2 Sync] Pushing final world and server state to Backblaze B2...");
             pushToB2(rootDir, rclone, b2Target, host, staleMin, true);
             releaseCloudLock(rootDir, rclone, b2Target);
+            cancelRemoteStop(rootDir, rclone, b2Target);
         }
 
         // Syncthing Fallback (if active)
@@ -316,6 +347,74 @@ public class ServerLauncher {
         } catch (IOException ignored) {}
 
         System.out.println("[Cluster] Cluster cleanly released. Ready for next host.");
+    }
+
+    private static void checkRemoteStopSignal(Path rootDir, String rclone, String b2Target, BufferedWriter mcStdin) {
+        if (remoteStopTriggered.get()) return;
+
+        CommandResult res = runCommand(rootDir, rclone, "cat", b2Target + "/remote_stop.signal");
+        if (res.exitCode == 0 && !res.stdout.isEmpty()) {
+            if (remoteStopTriggered.compareAndSet(false, true)) {
+                String reason = extractJsonString(res.stdout, "reason");
+                if (reason == null || reason.isEmpty()) reason = "Admin requested server stop";
+                String requestedBy = extractJsonString(res.stdout, "requested_by");
+                if (requestedBy == null || requestedBy.isEmpty()) requestedBy = "Admin";
+
+                System.out.println("\n========================================================");
+                System.out.printf("[REMOTE STOP] Signal received from %s!%n", requestedBy);
+                System.out.printf("[REMOTE STOP] Reason: %s%n", reason);
+                System.out.println("Broadcasting 30s countdown to players and stopping gracefully...");
+                System.out.println("========================================================\n");
+
+                final String finalReason = reason;
+                new Thread(() -> {
+                    try {
+                        if (mcStdin != null) {
+                            synchronized (mcStdin) {
+                                mcStdin.write("say [CLUSTER] Remote server stop requested by Admin.\n");
+                                mcStdin.write("say [CLUSTER] Reason: " + finalReason + "\n");
+                                mcStdin.write("say [CLUSTER] Server will save and shut down in 30 seconds...\n");
+                                mcStdin.flush();
+                            }
+                            Thread.sleep(20000); // 20s
+                            synchronized (mcStdin) {
+                                mcStdin.write("say [CLUSTER] Server shutting down in 10 seconds...\n");
+                                mcStdin.flush();
+                            }
+                            Thread.sleep(5000); // 5s
+                            synchronized (mcStdin) {
+                                mcStdin.write("say [CLUSTER] Server shutting down in 5 seconds...\n");
+                                mcStdin.flush();
+                            }
+                            Thread.sleep(5000); // 5s
+                            synchronized (mcStdin) {
+                                mcStdin.write("say [CLUSTER] Stopping now. All progress is saved!\n");
+                                mcStdin.write("save-all flush\n");
+                                mcStdin.write("stop\n");
+                                mcStdin.flush();
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }, "RemoteStopWatcher").start();
+            }
+        }
+    }
+
+    private static void dispatchRemoteStop(Path rootDir, String rclone, String b2Target, String host, String reason) {
+        String json = String.format("{\"requested_by\":\"%s\",\"reason\":\"%s\",\"timestamp\":\"%s\"}",
+                host, reason.replace("\"", "\\\""), DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        runCommandWithInput(json, rootDir, rclone, "rcat", b2Target + "/remote_stop.signal");
+        System.out.println("\n========================================================");
+        System.out.println("[SUCCESS] Remote stop signal dispatched to Backblaze B2!");
+        System.out.printf("  Reason: %s%n", reason);
+        System.out.println("  The running host will detect this within 30 seconds,");
+        System.out.println("  broadcast a 30s countdown to online players, save,");
+        System.out.println("  sync to the cloud, and release the lock.");
+        System.out.println("========================================================\n");
+    }
+
+    private static void cancelRemoteStop(Path rootDir, String rclone, String b2Target) {
+        runCommand(rootDir, rclone, "deletefile", b2Target + "/remote_stop.signal");
     }
 
     private static boolean pullFromB2(Path rootDir, String rclone, String b2Target, int staleMin, boolean force) {
