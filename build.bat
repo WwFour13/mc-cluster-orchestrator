@@ -31,8 +31,9 @@ set "TARGET_DIR="
 if exist "%ORCH_DIR%\..\minecraft-server" set "TARGET_DIR=%ORCH_DIR%\..\minecraft-server"
 if exist "%ORCH_DIR%\minecraft-server" set "TARGET_DIR=%ORCH_DIR%\minecraft-server"
 if "!TARGET_DIR!"=="" (
-    echo [WARN] Neither '..\minecraft-server' nor 'minecraft-server' directory found.
-    set "TARGET_DIR=%ORCH_DIR%"
+    echo [INFO] 'minecraft-server' directory not found. Creating it at '%ORCH_DIR%\minecraft-server'...
+    mkdir "%ORCH_DIR%\minecraft-server"
+    set "TARGET_DIR=%ORCH_DIR%\minecraft-server"
 )
 
 :: 3. Compile ServerLauncher.java
@@ -74,6 +75,40 @@ if exist "%ORCH_DIR%\cluster-guard\build_guard.bat" (
     echo [MC Cluster Guard] Triggering ClusterGuard build...
     echo ========================================================
     call "%ORCH_DIR%\cluster-guard\build_guard.bat"
+)
+
+:: 6. Auto-provision operational templates into deployment folder
+if exist "%ORCH_DIR%\templates" (
+    echo.
+    echo ========================================================
+    echo [MC Cluster Orchestrator] Deploying operational templates...
+    echo ========================================================
+    if exist "%ORCH_DIR%\templates\run_server.bat" (
+        copy /y "%ORCH_DIR%\templates\run_server.bat" "!TARGET_DIR!\run_server.bat" >nul
+        echo   [OK] Deployed run_server.bat (Windows)
+    )
+    if exist "%ORCH_DIR%\templates\run_server.sh" (
+        copy /y "%ORCH_DIR%\templates\run_server.sh" "!TARGET_DIR!\run_server.sh" >nul
+        echo   [OK] Deployed run_server.sh (Linux/macOS)
+    )
+    if exist "%ORCH_DIR%\templates\.stignore" (
+        if not exist "!TARGET_DIR!\.stignore" (
+            copy /y "%ORCH_DIR%\templates\.stignore" "!TARGET_DIR!\.stignore" >nul
+            echo   [OK] Deployed .stignore
+        )
+    )
+    if not exist "!TARGET_DIR!\config.json" (
+        if exist "%ORCH_DIR%\templates\config.example.json" (
+            copy /y "%ORCH_DIR%\templates\config.example.json" "!TARGET_DIR!\config.json" >nul
+            echo   [OK] Initialized config.json (Please configure with your Syncthing key)
+        )
+    )
+    if not exist "!TARGET_DIR!\[template]config.json" (
+        if exist "%ORCH_DIR%\templates\config.example.json" (
+            copy /y "%ORCH_DIR%\templates\config.example.json" "!TARGET_DIR!\[template]config.json" >nul
+            echo   [OK] Deployed [template]config.json for co-hosts
+        )
+    )
 )
 
 echo.
