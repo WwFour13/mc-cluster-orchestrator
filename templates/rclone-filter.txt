@@ -1,0 +1,28 @@
+# Exclude local and cache directories
+- /backups/**
+- /bin/**
+- /cache/**
+- /logs/**
+- /.paper/**
+- /libraries/**
+- /versions/**
+- /.stversions/**
+- /.stfolder/**
+
+# Exclude local credentials, locks, syncthing metadata, and scripts
+- config.json
+- [template]config.json
+- *.template.json
+- .server_active.lock
+- .cluster_session
+- .stignore
+- cluster.lock
+- session.lock
+- **/session.lock
+- *.bat
+- *.sh
+- *.jar
+- rclone-filter.txt
+
+# Include everything else (world, plugins, configs, manifest.json)
++ /**

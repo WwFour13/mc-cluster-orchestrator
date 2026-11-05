@@ -1,24 +1,12 @@
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
-import java.time.Duration;
-import java.time.Instant;
+import java.io.*;
+import java.net.*;
+import java.net.http.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.time.*;
 import java.time.format.DateTimeFormatter;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.concurrent.*;
+import java.util.regex.*;
 
 public class ServerLauncher {
 
@@ -28,6 +16,10 @@ public class ServerLauncher {
 
     private static ScheduledExecutorService heartbeatScheduler;
     private static volatile boolean isShuttingDown = false;
+    private static Process activeMcProcess = null;
+    private static BufferedWriter activeMcStdin = null;
+
+    private static record CommandResult(int exitCode, String stdout, String stderr) {}
 
     public static void main(String[] args) {
         Path rootDir = Paths.get("").toAbsolutePath();
@@ -38,28 +30,101 @@ public class ServerLauncher {
         if (!Files.exists(configPath)) {
             System.err.println("[ERROR] config.json not found in " + rootDir);
             if (Files.exists(rootDir.resolve("[template]config.json"))) {
-                System.err.println("[TIP] Found '[template]config.json'! Copy it to 'config.json' and add your Syncthing API key.");
+                System.err.println("[TIP] Found '[template]config.json'! Copy it to 'config.json' and fill in your keys.");
             }
-            return;
-        }
-
-        if (!Files.exists(coreBinaryPath)) {
-            System.err.println("[ERROR] Server core missing! Expected at: " + coreBinaryPath);
-            System.err.println("Ensure your paper.jar is renamed to core.dat inside the 'bin' folder.");
             return;
         }
 
         try {
             String configJson = Files.readString(configPath);
+            String b2Bucket = extractJsonString(configJson, "b2_bucket");
+            String b2KeyId = extractJsonString(configJson, "b2_key_id");
+            String b2AppKey = extractJsonString(configJson, "b2_application_key");
+
             String duckDomain = extractJsonString(configJson, "domain");
             String duckToken = extractJsonString(configJson, "token");
             String javaMemory = extractJsonString(configJson, "java_memory");
+            if (javaMemory == null || javaMemory.isEmpty()) javaMemory = "6G";
+
             String syncthingUrl = extractJsonString(configJson, "api_url");
             String syncthingKey = extractJsonString(configJson, "api_key");
             String syncthingFid = extractJsonString(configJson, "folder_id");
 
             int staleMin = extractJsonInt(configJson, "stale_timeout_minutes", 10);
             int heartbeatSec = extractJsonInt(configJson, "heartbeat_seconds", 120);
+            int saveIntervalMin = extractJsonInt(configJson, "save_interval_minutes", 15);
+
+            boolean hasB2 = (b2Bucket != null && !b2Bucket.isEmpty() && !b2Bucket.startsWith("YOUR_")
+                    && b2KeyId != null && !b2KeyId.isEmpty() && !b2KeyId.startsWith("YOUR_")
+                    && b2AppKey != null && !b2AppKey.isEmpty() && !b2AppKey.startsWith("YOUR_"));
+
+            String rclone = findRclone(rootDir);
+            String b2Target = hasB2 ? getB2Remote(b2Bucket, b2KeyId, b2AppKey) : null;
+            String localHost = getHostName();
+
+            // Handle CLI Subcommands
+            if (args.length > 0) {
+                String cmd = args[0].toLowerCase();
+                boolean force = (args.length > 1 && ("--force".equalsIgnoreCase(args[1]) || "-f".equalsIgnoreCase(args[1])));
+
+                switch (cmd) {
+                    case "pull":
+                        if (!hasB2) {
+                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
+                            return;
+                        }
+                        pullFromB2(rootDir, rclone, b2Target, staleMin, force);
+                        return;
+
+                    case "push":
+                        if (!hasB2) {
+                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
+                            return;
+                        }
+                        pushToB2(rootDir, rclone, b2Target, localHost, staleMin, false);
+                        return;
+
+                    case "unlock":
+                        System.out.println("[UNLOCK] Releasing local and cloud cluster locks...");
+                        Files.deleteIfExists(lockPath);
+                        if (hasB2) {
+                            releaseCloudLock(rootDir, rclone, b2Target);
+                        }
+                        System.out.println("[UNLOCK] Emergency cluster unlock complete.");
+                        return;
+
+                    case "status":
+                        System.out.println("[STATUS] Checking cluster lock & sync status...");
+                        if (hasB2) {
+                            CommandResult catRes = runCommand(rootDir, rclone, "cat", b2Target + "/cluster.lock");
+                            if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
+                                System.out.println("Active Cloud Lock: " + catRes.stdout);
+                            } else {
+                                System.out.println("Cloud Lock: FREE (No active host)");
+                            }
+                            int cloudGen = readCloudGeneration(rootDir, rclone, b2Target);
+                            int localGen = readLocalGeneration(rootDir);
+                            System.out.printf("Cloud World Generation: #%d | Local World Base: #%d%n", cloudGen, localGen);
+                        }
+                        if (Files.exists(lockPath)) {
+                            System.out.println("Local Lock File: Present (" + Files.readString(lockPath) + ")");
+                        } else {
+                            System.out.println("Local Lock File: None");
+                        }
+                        return;
+
+                    default:
+                        System.err.println("[ERROR] Unknown argument: " + cmd + " (Available: pull, push, unlock, status)");
+                        return;
+                }
+            }
+
+            // Normal Startup Flow
+            if (!Files.exists(coreBinaryPath)) {
+                System.err.println("[ERROR] Server core missing! Expected at: " + coreBinaryPath);
+                System.err.println("Ensure your paper.jar is renamed to core.dat inside the 'bin' folder.");
+                return;
+            }
 
             // 1. Port Verification
             System.out.println("[1/6] Verifying port 25565 availability...");
@@ -68,71 +133,92 @@ public class ServerLauncher {
                 return;
             }
 
-            // 2. Lock State Verification & Stale Recovery
+            // 2. Lock State Verification & Acquisition
             System.out.println("[2/6] Evaluating cluster lock state...");
-            String localHost = getHostName();
 
-            if (Files.exists(lockPath)) {
-                String lockContent = Files.readString(lockPath);
-                String activeHost = extractJsonString(lockContent, "host");
-                String timestampStr = extractJsonString(lockContent, "timestamp");
-
-                if (timestampStr != null && !timestampStr.isEmpty()) {
-                    Instant lastBeat = Instant.parse(timestampStr);
-                    long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
-
-                    if (elapsedMinutes >= staleMin) {
-                        System.out.printf("[WARN] Host '%s' heartbeat expired (%d min elapsed). Reclaiming lock...%n", 
-                                activeHost, elapsedMinutes);
-                        Files.deleteIfExists(lockPath);
+            if (hasB2) {
+                if (!acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
+                    return;
+                }
+            } else {
+                if (Files.exists(lockPath)) {
+                    String lockContent = Files.readString(lockPath);
+                    String activeHost = extractJsonString(lockContent, "host");
+                    String timestampStr = extractJsonString(lockContent, "timestamp");
+                    if (timestampStr != null && !timestampStr.isEmpty()) {
+                        Instant lastBeat = Instant.parse(timestampStr);
+                        long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
+                        if (elapsedMinutes >= staleMin) {
+                            System.out.printf("[WARN] Host '%s' heartbeat expired (%d min elapsed). Reclaiming lock...%n", activeHost, elapsedMinutes);
+                            Files.deleteIfExists(lockPath);
+                        } else {
+                            System.err.printf("[ABORT] Server actively hosted by: %s%n", activeHost);
+                            System.err.printf("Active heartbeat was pulsed %d minutes ago.%n", elapsedMinutes);
+                            return;
+                        }
                     } else {
-                        System.err.printf("[ABORT] Server actively hosted by: %s%n", activeHost);
-                        System.err.printf("Active heartbeat was pulsed %d minutes ago.%n", elapsedMinutes);
-                        return;
+                        Files.deleteIfExists(lockPath);
                     }
-                } else {
-                    Files.deleteIfExists(lockPath);
                 }
             }
 
-            // 3. Acquire Distributed Lock
-            System.out.println("[3/6] Acquiring cluster lock...");
+            // Write local lock file
+            System.out.println("[3/6] Confirming local cluster lock...");
             writeLockFile(lockPath, localHost);
-            System.out.println("Lock successfully acquired by: " + localHost);
 
-            // Graceful shutdown hook for interrupt signals / SIGTERM
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> 
-                cleanup(lockPath, syncthingUrl, syncthingKey, syncthingFid)
+            // Register Graceful Shutdown Hook
+            final String finalB2Target = b2Target;
+            final String finalRclone = rclone;
+            final String finalSyncthingUrl = syncthingUrl;
+            final String finalSyncthingKey = syncthingKey;
+            final String finalSyncthingFid = syncthingFid;
+            final String finalLocalHost = localHost;
+            final int finalStaleMin = staleMin;
+
+            Runtime.getRuntime().addShutdownHook(new Thread(() ->
+                    cleanup(rootDir, lockPath, finalRclone, finalB2Target, finalLocalHost, finalStaleMin,
+                            finalSyncthingUrl, finalSyncthingKey, finalSyncthingFid, activeMcProcess, activeMcStdin)
             ));
 
-            // 4. Dynamic Mesh DNS Configuration
-            String tailscaleIp = getTailscaleIp();
-            if (tailscaleIp == null || tailscaleIp.isEmpty()) {
-                System.out.println("[WARN] Tailscale not detected or not running. Operating in local mode (127.0.0.1).");
-                tailscaleIp = "127.0.0.1";
-            } else {
-                System.out.println("[Mesh] Resolved Tailscale IPv4: " + tailscaleIp);
-            }
-
+            // Dynamic DNS (if DuckDNS configured)
             if (duckToken != null && !duckToken.isEmpty() && !duckToken.startsWith("YOUR_")) {
+                String tailscaleIp = getTailscaleIp();
+                if (tailscaleIp == null || tailscaleIp.isEmpty()) tailscaleIp = "127.0.0.1";
                 updateDuckDns(duckDomain, duckToken, tailscaleIp);
-            } else {
-                System.out.println("[DNS] DuckDNS token unconfigured in config.json. Skipping dynamic DNS update.");
             }
 
-            // 5. Pre-Boot State Verification
-            System.out.println("[4/6] Checking Syncthing database for cluster convergence...");
-            waitForSyncthing(syncthingUrl, syncthingKey, syncthingFid, "Pre-boot sync", 120);
+            // 4. Pre-Boot State Convergence
+            if (hasB2) {
+                System.out.println("[4/6] Pulling latest world state from Backblaze B2...");
+                pullFromB2(rootDir, rclone, b2Target, staleMin, true);
+            } else if (syncthingKey != null && !syncthingKey.isEmpty() && !syncthingKey.startsWith("YOUR_")) {
+                System.out.println("[4/6] Checking Syncthing database for cluster convergence...");
+                waitForSyncthing(syncthingUrl, syncthingKey, syncthingFid, "Pre-boot sync", 120);
+            } else {
+                System.out.println("[4/6] No cloud sync provider configured. Running in local standalone mode.");
+            }
 
-            // 6. Asynchronous Heartbeat Dispatcher
+            // 5. Asynchronous Heartbeat & Periodic In-Game Autosave Dispatcher
             heartbeatScheduler = Executors.newSingleThreadScheduledExecutor();
+
+            // Heartbeat timer (every heartbeatSec)
             heartbeatScheduler.scheduleAtFixedRate(() -> {
                 try {
                     writeLockFile(lockPath, localHost);
+                    if (hasB2) {
+                        writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
+                    }
                 } catch (Exception ignored) {}
             }, heartbeatSec, heartbeatSec, TimeUnit.SECONDS);
 
-            // 7. Launch Server Process with Inherited IO
+            // In-Game Autosave & Incremental Cloud Push (every saveIntervalMin)
+            if (hasB2 && saveIntervalMin > 0) {
+                heartbeatScheduler.scheduleAtFixedRate(() -> {
+                    triggerIncrementalPush(rootDir, rclone, b2Target, activeMcStdin);
+                }, saveIntervalMin, saveIntervalMin, TimeUnit.MINUTES);
+            }
+
+            // 6. Launch Server Process with Piped Console Forwarding
             System.out.printf("[5/6] Executing server runtime (%s heap allocation)...%n", javaMemory);
             ProcessBuilder pb = new ProcessBuilder(
                     "java",
@@ -142,12 +228,34 @@ public class ServerLauncher {
                     "-jar", coreBinaryPath.toString(),
                     "nogui"
             );
-            pb.inheritIO();
-            Process mcProcess = pb.start();
-            mcProcess.waitFor();
+            pb.directory(rootDir.toFile());
+            pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+            pb.redirectError(ProcessBuilder.Redirect.INHERIT);
 
-            // 8. Normal Teardown
-            cleanup(lockPath, syncthingUrl, syncthingKey, syncthingFid);
+            activeMcProcess = pb.start();
+            activeMcStdin = new BufferedWriter(new OutputStreamWriter(activeMcProcess.getOutputStream(), StandardCharsets.UTF_8));
+
+            // Forward user keyboard input to Minecraft console
+            final BufferedWriter processWriter = activeMcStdin;
+            Thread consoleForwarder = new Thread(() -> {
+                try (BufferedReader consoleReader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = consoleReader.readLine()) != null) {
+                        synchronized (processWriter) {
+                            processWriter.write(line + "\n");
+                            processWriter.flush();
+                        }
+                    }
+                } catch (IOException ignored) {}
+            });
+            consoleForwarder.setDaemon(true);
+            consoleForwarder.start();
+
+            activeMcProcess.waitFor();
+
+            // 7. Normal Teardown
+            cleanup(rootDir, lockPath, rclone, b2Target, localHost, staleMin,
+                    syncthingUrl, syncthingKey, syncthingFid, activeMcProcess, activeMcStdin);
 
         } catch (Exception e) {
             System.err.println("[ERROR] Fatal exception in orchestrator runtime: " + e.getMessage());
@@ -155,15 +263,42 @@ public class ServerLauncher {
         }
     }
 
-    private static synchronized void cleanup(Path lockPath, String syncthingUrl, String syncthingKey, String syncthingFid) {
+    private static synchronized void cleanup(Path rootDir, Path lockPath, String rclone, String b2Target,
+                                             String host, int staleMin,
+                                             String syncthingUrl, String syncthingKey, String syncthingFid,
+                                             Process mcProcess, BufferedWriter mcStdin) {
         if (isShuttingDown) return;
         isShuttingDown = true;
 
-        System.out.println("\n[6/6] Runtime terminated. Stopping heartbeat daemon...");
+        System.out.println("\n[6/6] Runtime terminated. Stopping background services...");
         if (heartbeatScheduler != null && !heartbeatScheduler.isShutdown()) {
             heartbeatScheduler.shutdownNow();
         }
 
+        if (mcProcess != null && mcProcess.isAlive()) {
+            System.out.println("[Shutdown] Gracefully stopping Minecraft server...");
+            try {
+                if (mcStdin != null) {
+                    synchronized (mcStdin) {
+                        mcStdin.write("stop\n");
+                        mcStdin.flush();
+                    }
+                }
+                boolean finished = mcProcess.waitFor(60, TimeUnit.SECONDS);
+                if (!finished) {
+                    mcProcess.destroyForcibly();
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // Push final world state to Backblaze B2 with generation progression
+        if (b2Target != null && !b2Target.isEmpty()) {
+            System.out.println("[B2 Sync] Pushing final world and server state to Backblaze B2...");
+            pushToB2(rootDir, rclone, b2Target, host, staleMin, true);
+            releaseCloudLock(rootDir, rclone, b2Target);
+        }
+
+        // Syncthing Fallback (if active)
         if (syncthingKey != null && !syncthingKey.isEmpty() && !syncthingKey.startsWith("YOUR_")) {
             try {
                 HttpRequest scanReq = HttpRequest.newBuilder()
@@ -173,14 +308,268 @@ public class ServerLauncher {
                         .build();
                 HTTP_CLIENT.send(scanReq, HttpResponse.BodyHandlers.discarding());
             } catch (Exception ignored) {}
-
             waitForSyncthing(syncthingUrl, syncthingKey, syncthingFid, "Outbound sync", 60);
         }
 
         try {
             Files.deleteIfExists(lockPath);
-            System.out.println("Cluster lock cleanly released. Cluster ready for next host.");
         } catch (IOException ignored) {}
+
+        System.out.println("[Cluster] Cluster cleanly released. Ready for next host.");
+    }
+
+    private static boolean pullFromB2(Path rootDir, String rclone, String b2Target, int staleMin, boolean force) {
+        if (!force && isCloudLocked(rootDir, rclone, b2Target, staleMin)) {
+            return false;
+        }
+
+        System.out.println("[B2 Sync] Pulling latest state from Backblaze B2...");
+        Path filterPath = rootDir.resolve("rclone-filter.txt");
+        String[] cmd;
+        if (Files.exists(filterPath)) {
+            cmd = new String[]{rclone, "copy", b2Target, ".", "--filter-from", filterPath.toString(), "--fast-list"};
+        } else {
+            cmd = new String[]{rclone, "copy", b2Target + "/world", "world", "--fast-list"};
+        }
+        CommandResult res = runCommand(rootDir, cmd);
+        if (res.exitCode == 0) {
+            int cloudGen = readCloudGeneration(rootDir, rclone, b2Target);
+            writeLocalGeneration(rootDir, cloudGen);
+            System.out.printf("[B2 Sync] Inbound synchronization complete (World Generation #%d).%n", cloudGen);
+            return true;
+        } else {
+            System.err.println("[WARN] Inbound sync returned code " + res.exitCode + ": " + res.stderr);
+            return false;
+        }
+    }
+
+    private static boolean pushToB2(Path rootDir, String rclone, String b2Target, String host, int staleMin, boolean isNormalTeardown) {
+        if (!isNormalTeardown && isCloudLocked(rootDir, rclone, b2Target, staleMin)) {
+            return false;
+        }
+
+        // Optimistic Concurrency Control: verify generation alignment
+        int cloudGen = readCloudGeneration(rootDir, rclone, b2Target);
+        int localGen = readLocalGeneration(rootDir);
+
+        if (cloudGen > 0 && localGen > 0 && localGen < cloudGen) {
+            System.err.println("\n========================================================");
+            System.err.printf("[CONFLICT DETECTED] Cloud is on Generation #%d, but your local base is Generation #%d.%n", cloudGen, localGen);
+            System.err.println("[REJECTED] Push aborted to prevent overwriting newer progress!");
+            System.err.println("You must run 'sync_pull' first to update your local files.");
+            System.err.println("========================================================\n");
+            return false;
+        }
+
+        Path filterPath = rootDir.resolve("rclone-filter.txt");
+        String[] cmd;
+        if (Files.exists(filterPath)) {
+            cmd = new String[]{rclone, "copy", ".", b2Target, "--filter-from", filterPath.toString(), "--fast-list", "--update"};
+        } else {
+            cmd = new String[]{rclone, "copy", "world", b2Target + "/world", "--fast-list", "--update"};
+        }
+        CommandResult res = runCommand(rootDir, cmd);
+        if (res.exitCode == 0) {
+            int nextGen = Math.max(cloudGen, localGen) + 1;
+            writeCloudGeneration(rootDir, rclone, b2Target, nextGen, host);
+            writeLocalGeneration(rootDir, nextGen);
+            System.out.printf("[B2 Sync] Outbound synchronization complete (Advanced to Generation #%d).%n", nextGen);
+            return true;
+        } else {
+            System.err.println("[WARN] Outbound sync returned code " + res.exitCode + ": " + res.stderr);
+            return false;
+        }
+    }
+
+    private static boolean isCloudLocked(Path rootDir, String rclone, String b2Target, int staleMin) {
+        CommandResult catRes = runCommand(rootDir, rclone, "cat", b2Target + "/cluster.lock");
+        if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
+            String activeHost = extractJsonString(catRes.stdout, "host");
+            String timestampStr = extractJsonString(catRes.stdout, "timestamp");
+            if (timestampStr != null && !timestampStr.isEmpty()) {
+                try {
+                    Instant lastBeat = Instant.parse(timestampStr);
+                    long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
+                    if (elapsedMinutes < staleMin) {
+                        System.err.printf("[ABORT] Cannot sync: Server is actively hosted by '%s'!%n", activeHost);
+                        System.err.printf("Active heartbeat was pulsed %d minutes ago. Wait until they finish and exit.%n", elapsedMinutes);
+                        return true;
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+        return false;
+    }
+
+    private static boolean acquireCloudLock(Path rootDir, String rclone, String b2Target, String host, int staleMin) {
+        CommandResult catRes = runCommand(rootDir, rclone, "cat", b2Target + "/cluster.lock");
+        if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
+            String activeHost = extractJsonString(catRes.stdout, "host");
+            String timestampStr = extractJsonString(catRes.stdout, "timestamp");
+            if (timestampStr != null && !timestampStr.isEmpty()) {
+                try {
+                    Instant lastBeat = Instant.parse(timestampStr);
+                    long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
+                    if (elapsedMinutes < staleMin) {
+                        System.err.printf("[ABORT] Server actively hosted by: %s%n", activeHost);
+                        System.err.printf("Active heartbeat was pulsed %d minutes ago.%n", elapsedMinutes);
+                        return false;
+                    } else {
+                        System.out.printf("[WARN] Host '%s' heartbeat expired (%d min elapsed). Reclaiming cloud lock...%n", activeHost, elapsedMinutes);
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+        writeCloudHeartbeat(rootDir, rclone, b2Target, host);
+        System.out.println("Cloud lock successfully acquired by: " + host);
+        return true;
+    }
+
+    private static void releaseCloudLock(Path rootDir, String rclone, String b2Target) {
+        runCommand(rootDir, rclone, "deletefile", b2Target + "/cluster.lock");
+    }
+
+    private static void writeCloudHeartbeat(Path rootDir, String rclone, String b2Target, String host) {
+        String lockJson = String.format("{\"host\":\"%s\",\"timestamp\":\"%s\"}",
+                host, DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        runCommandWithInput(lockJson, rootDir, rclone, "rcat", b2Target + "/cluster.lock");
+    }
+
+    private static int readCloudGeneration(Path rootDir, String rclone, String b2Target) {
+        CommandResult res = runCommand(rootDir, rclone, "cat", b2Target + "/manifest.json");
+        if (res.exitCode == 0 && !res.stdout.isEmpty()) {
+            return extractJsonInt(res.stdout, "generation", 1);
+        }
+        return 1;
+    }
+
+    private static void writeCloudGeneration(Path rootDir, String rclone, String b2Target, int gen, String host) {
+        String json = String.format("{\"generation\":%d,\"last_host\":\"%s\",\"timestamp\":\"%s\"}",
+                gen, host, DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        runCommandWithInput(json, rootDir, rclone, "rcat", b2Target + "/manifest.json");
+    }
+
+    private static int readLocalGeneration(Path rootDir) {
+        Path sessionFile = rootDir.resolve(".cluster_session");
+        if (Files.exists(sessionFile)) {
+            try {
+                String json = Files.readString(sessionFile);
+                return extractJsonInt(json, "base_generation", 1);
+            } catch (Exception ignored) {}
+        }
+        return 1;
+    }
+
+    private static void writeLocalGeneration(Path rootDir, int gen) {
+        Path sessionFile = rootDir.resolve(".cluster_session");
+        try {
+            String json = String.format("{\"base_generation\":%d}", gen);
+            Files.writeString(sessionFile, json, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (Exception ignored) {}
+    }
+
+    private static void triggerIncrementalPush(Path rootDir, String rclone, String b2Target, BufferedWriter mcStdin) {
+        if (mcStdin != null) {
+            try {
+                synchronized (mcStdin) {
+                    mcStdin.write("save-all flush\n");
+                    mcStdin.flush();
+                }
+                System.out.println("[Autosave] Flushed dirty chunks to disk. Dispatching incremental snapshot to B2...");
+                Thread.sleep(1500);
+            } catch (Exception ignored) {}
+        }
+        CompletableFuture.runAsync(() -> {
+            CommandResult r = runCommand(rootDir, rclone, "copy", "world", b2Target + "/world", "--fast-list", "--update");
+            if (r.exitCode == 0) {
+                System.out.println("[Autosave] Incremental world snapshot synced to Backblaze B2.");
+            }
+        });
+    }
+
+    private static String findRclone(Path rootDir) {
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+        Path localBin = rootDir.resolve("bin").resolve(isWindows ? "rclone.exe" : "rclone");
+        if (Files.exists(localBin)) {
+            return localBin.toAbsolutePath().toString();
+        }
+        String cmd = isWindows ? "where" : "which";
+        try {
+            Process p = new ProcessBuilder(cmd, "rclone").start();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line = r.readLine();
+                if (line != null && !line.trim().isEmpty() && Files.exists(Paths.get(line.trim()))) {
+                    return line.trim();
+                }
+            }
+        } catch (Exception ignored) {}
+        return isWindows ? "rclone.exe" : "rclone";
+    }
+
+    private static String getB2Remote(String bucket, String keyId, String appKey) {
+        return String.format(":b2,account=\"%s\",key=\"%s\":%s/server", keyId, appKey, bucket);
+    }
+
+    private static CommandResult runCommand(Path workingDir, String... command) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(command);
+            if (workingDir != null) pb.directory(workingDir.toFile());
+            Process p = pb.start();
+            StringBuilder stdout = new StringBuilder();
+            StringBuilder stderr = new StringBuilder();
+            Thread outThread = new Thread(() -> {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                    String l; while ((l = r.readLine()) != null) stdout.append(l).append("\n");
+                } catch (IOException ignored) {}
+            });
+            Thread errThread = new Thread(() -> {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getErrorStream(), StandardCharsets.UTF_8))) {
+                    String l; while ((l = r.readLine()) != null) stderr.append(l).append("\n");
+                } catch (IOException ignored) {}
+            });
+            outThread.start();
+            errThread.start();
+            int exitCode = p.waitFor();
+            outThread.join(3000);
+            errThread.join(3000);
+            return new CommandResult(exitCode, stdout.toString().trim(), stderr.toString().trim());
+        } catch (Exception e) {
+            return new CommandResult(-1, "", e.getMessage());
+        }
+    }
+
+    private static CommandResult runCommandWithInput(String input, Path workingDir, String... command) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(command);
+            if (workingDir != null) pb.directory(workingDir.toFile());
+            Process p = pb.start();
+            if (input != null) {
+                try (OutputStream os = p.getOutputStream()) {
+                    os.write(input.getBytes(StandardCharsets.UTF_8));
+                    os.flush();
+                }
+            }
+            StringBuilder stdout = new StringBuilder();
+            StringBuilder stderr = new StringBuilder();
+            Thread outThread = new Thread(() -> {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                    String l; while ((l = r.readLine()) != null) stdout.append(l).append("\n");
+                } catch (IOException ignored) {}
+            });
+            Thread errThread = new Thread(() -> {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getErrorStream(), StandardCharsets.UTF_8))) {
+                    String l; while ((l = r.readLine()) != null) stderr.append(l).append("\n");
+                } catch (IOException ignored) {}
+            });
+            outThread.start();
+            errThread.start();
+            int exitCode = p.waitFor();
+            outThread.join(3000);
+            errThread.join(3000);
+            return new CommandResult(exitCode, stdout.toString().trim(), stderr.toString().trim());
+        } catch (Exception e) {
+            return new CommandResult(-1, "", e.getMessage());
+        }
     }
 
     private static boolean isPortAvailable(int port) {
@@ -209,7 +598,7 @@ public class ServerLauncher {
     private static String getTailscaleIp() {
         try {
             Process process = new ProcessBuilder("tailscale", "ip", "-4").start();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line = reader.readLine();
                 return line != null ? line.trim() : null;
             }
@@ -236,10 +625,8 @@ public class ServerLauncher {
 
     private static void waitForSyncthing(String url, String key, String fid, String stage, int timeoutSec) {
         if (url == null || url.isEmpty() || key == null || key.isEmpty() || key.startsWith("YOUR_")) {
-            System.out.printf("[Syncthing] Unconfigured in config.json. Skipping (%s).%n", stage);
             return;
         }
-
         System.out.printf("[Syncthing] Monitoring replication state (%s)...%n", stage);
         int elapsed = 0;
         String statusUri = url + "/rest/db/status?folder=" + fid;

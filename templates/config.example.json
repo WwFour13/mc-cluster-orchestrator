@@ -1,16 +1,12 @@
 {
-  "syncthing": {
-    "api_url": "http://127.0.0.1:8384",
-    "api_key": "YOUR_SYNCTHING_API_KEY",
-    "folder_id": "mc-server-cluster"
-  },
-  "duckdns": {
-    "domain": "my-cluster-mc",
-    "token": "YOUR_DUCKDNS_TOKEN"
-  },
-  "server": {
-    "java_memory": "6G",
-    "heartbeat_seconds": 120,
-    "stale_timeout_minutes": 10
-  }
+  "server_jar": "bin/core.dat",
+  "java_memory": "6G",
+  "min_ram": "2G",
+  "max_ram": "6G",
+  "heartbeat_seconds": 120,
+  "stale_timeout_minutes": 10,
+  "save_interval_minutes": 15,
+  "b2_bucket": "YOUR_BUCKET_NAME",
+  "b2_key_id": "YOUR_APPLICATION_KEY_ID",
+  "b2_application_key": "YOUR_APPLICATION_KEY"
 }

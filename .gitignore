@@ -13,6 +13,10 @@ target/
 .classpath
 .project
 
+# Archives & distribution zips
+*.zip
+cohost-starter-pack.zip
+
 # Operational server runtime directory (dist / deployment only)
 minecraft-server/
 dist/

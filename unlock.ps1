@@ -1,20 +1,12 @@
-# Emergency Cluster Lock Release Tool
-$locations = @(
-    "$PSScriptRoot\minecraft-server\.server_active.lock",
-    "$PSScriptRoot\.server_active.lock",
-    "$PSScriptRoot\..\minecraft-server\.server_active.lock"
-)
+Set-Location $PSScriptRoot
 
-$found = $false
-foreach ($loc in $locations) {
-    if (Test-Path $loc) {
-        Remove-Item $loc -Force
-        Write-Host "[OK] Emergency cluster lock released at: $loc" -ForegroundColor Green
-        $found = $true
-    }
+Write-Host "[Emergency Unlock] Attempting cloud and local unlock..." -ForegroundColor Cyan
+if (Test-Path "$PSScriptRoot\minecraft-server\ServerLauncher.jar") {
+    & java -jar "$PSScriptRoot\minecraft-server\ServerLauncher.jar" unlock
+} elseif (Test-Path "$PSScriptRoot\ServerLauncher.jar") {
+    & java -jar "$PSScriptRoot\ServerLauncher.jar" unlock
+} else {
+    Remove-Item "$PSScriptRoot\minecraft-server\.server_active.lock" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$PSScriptRoot\.server_active.lock" -Force -ErrorAction SilentlyContinue
+    Write-Host "[OK] Local locks cleared." -ForegroundColor Green
 }
-
-if (-not $found) {
-    Write-Host "[INFO] No active cluster lock found (.server_active.lock)." -ForegroundColor Yellow
-}
-

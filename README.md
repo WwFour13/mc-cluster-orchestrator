@@ -1,6 +1,6 @@
 # MC Cluster Orchestrator
 
-A lightweight, peer-to-peer distributed Minecraft server orchestrator. Coordinates active hosting across multiple personal machines without expensive 24/7 dedicated cloud hosting, while preventing world desync and split-brain corruption.
+A lightweight, distributed Minecraft server orchestrator. Coordinates active hosting across multiple personal machines without expensive 24/7 dedicated cloud hosting, while preventing world desync and split-brain corruption using **Backblaze B2** (Cloud Hub) or **Syncthing** (P2P Mesh).
 
 ---
 
@@ -8,181 +8,165 @@ A lightweight, peer-to-peer distributed Minecraft server orchestrator. Coordinat
 
 - **Zero-Friction Player Access:** Players connect via standard vanilla Minecraft to a single, static address (e.g. `your-cluster.ply.gg`). No client VPNs, Hamachi, or third-party software are required for players.
 - **Cross-Platform Support:** Orchestrator and fail-safe components run natively across **Windows, macOS, and Linux**.
-- **High Availability Without Cloud Costs:** Any authorized co-host in the cluster can boot and run the server when the primary host is offline. Players always connect to the exact same address regardless of who is hosting.
-- **Zero Risk of World Desynchronization:** Strict distributed locking ensures that two co-hosts can never run the server simultaneously. World saves, inventory, player stats, and dimensions are guaranteed to be 100% converged before the server boots.
-- **Bypasses Strict CGNAT, Campus & Double-NAT Firewalls:** Solves institutional networks, university Wi-Fi restrictions, double-NAT, and AP client isolation using dedicated Anycast tunneling.
+- **Asynchronous Cloud Sync (No Machine Overlap Needed):** Uses a free Backblaze B2 bucket (10 GB free) so hosts do not need to be online at the same time to pass the world. Host A can upload and turn off their PC; Host B can wake up hours later, pull the latest world, and host.
+- **Zero Background Daemons:** No programs (like Syncthing) need to run in the background 24/7. Rclone only executes when starting, stopping, or running scheduled autosaves.
+- **Optimistic Concurrency Control (OCC):** Every session is tagged with a sequential Generation Number (`manifest.json`). Stale hosts are physically blocked from pushing old worlds over newer cloud progress.
+- **Premature Pull Protection:** `sync_pull` automatically detects if another host is currently playing and aborts to prevent downloading incomplete, mid-game chunk sectors.
+- **Mid-Game Crash Safety:** Flushes dirty chunks (`save-all flush`) and runs incremental snapshot uploads to Backblaze B2 every 15 minutes during gameplay. If a host's computer dies, at most 15 minutes of progress is lost.
+- **Fail-Safe Rollback (30-Day Versioning):** Backblaze B2 natively keeps previous revisions of chunk files for 30 days for free, making accidental corruption or player griefing instantly reversible.
+- **Bypasses Strict CGNAT, Campus & Double-NAT Firewalls:** Solves institutional networks, university Wi-Fi restrictions, double-NAT, and AP client isolation using dedicated Anycast tunneling via Playit.gg.
 
 ---
 
-## Core Features
+## Core Features & Safety Guardrails
 
-- **Distributed Lock Management:** Coordinates the active host via `.server_active.lock` replicated through Syncthing. Includes automated stale-lock detection and expiration if an active host's machine abruptly loses power or crashes.
-- **Telemetry Heartbeat:** Runs an asynchronous background daemon that periodically updates the lock timestamp while the server process is healthy.
-- **State Convergence Check:** Communicates with the local Syncthing REST API (`/rest/db/status`) to ensure incoming file deltas reach 0 bytes before allowing the server to launch. Automatically triggers a sync scan (`/rest/db/scan`) upon server shutdown.
-- **Safe-Launch Fail-Safe Plugin (`ClusterGuard`):** A custom Paper/Spigot Java plugin compiled with Java 21 that inspects the `-Dcluster.safe_launch=true` runtime property. If anyone attempts to double-click the server JAR directly, ClusterGuard aborts boot immediately to prevent unsynchronized state divergence.
-- **Zero-Port-Forward Anycast Ingress (Playit.gg):** Utilizes an outbound encrypted Anycast tunnel plugin. The tunnel credentials reside within the synced `plugins/` directory, allowing the permanent domain to follow whichever cluster host boots the server.
-- **Automated Deployment Pipeline:** `build.bat` compiles the orchestrator and fail-safe plugin, creates the server folder if missing, and auto-provisions all operational templates (`run_server.bat`, `run_server.sh`, `.stignore`, `config.json`, `[template]config.json`).
-- **Emergency Lock Release Tools:** Dedicated cross-platform administrative scripts (`force_unlock.bat`, `force_unlock.sh`, and `unlock.ps1`) located at the repository root to manually release stranded locks without touching running server processes.
-- **Dynamic Mesh DNS (Optional / Fallback):** Built-in support for resolving the local node's Tailscale IPv4 interface and updating DuckDNS records upon lock acquisition for private mesh networks.
+| Safety Guard | How It Works |
+| :--- | :--- |
+| **Distributed Cloud Lock** | Coordinates the active host via `cluster.lock` in Backblaze B2. If a co-host tries to start while someone is hosting, boot is safely aborted. |
+| **Premature Pull Guard** | `sync_pull` checks `cluster.lock` and refuses to download if someone is currently hosting, preventing partial or torn writes. |
+| **Generation Sequence Guard** | Tracks `generation: #N` in `manifest.json`. If a co-host with an outdated local world attempts to push, the push is hard-rejected until they pull. |
+| **`--update` Timestamp Guard** | Rclone strictly skips files on the cloud that have newer timestamps than the local files being uploaded. |
+| **Heartbeat & Stale Reclaim** | The active host updates the lock timestamp every 120s. If a host's machine loses power, the lock auto-expires after 10 minutes so other co-hosts are not trapped. |
+| **In-Game Incremental Push** | Every 15 minutes, Paper runs `save-all flush` and uploads an incremental delta of modified `.mca` region files in the background without lag. |
+| **ClusterGuard Fail-Safe Plugin** | A custom Paper/Spigot Java plugin that prevents direct JAR launches that bypass cluster orchestration. |
 
 ---
 
 ## Repository & Deployment Architecture
 
-> **Note for Admins:** This repository contains only the orchestration engine, build scripts, fail-safe plugin, and operational templates. Operational server binaries, world saves, and runtime data are strictly excluded via `.gitignore` and are provided by you.
-
 ```text
-mc-cluster/
-├── mc-cluster-orchestrator/            <-- [DEV / GIT REPO]
-│   ├── .gitignore
-│   ├── pom.xml                         <-- Root Maven project descriptor
-│   ├── README.md
-│   ├── build.bat                       <-- Compiles & auto-deploys (Windows)
-│   ├── build.sh                        <-- Compiles & auto-deploys (Linux/macOS)
-│   ├── package_jar.ps1                 <-- Utility script for packaging jars
-│   ├── force_unlock.bat                <-- Admin emergency lock release (Windows Batch)
-│   ├── force_unlock.sh                 <-- Admin emergency lock release (Linux/macOS Bash)
-│   ├── unlock.ps1                      <-- Admin emergency lock release (PowerShell)
-│   ├── src/
-│   │   └── ServerLauncher.java         <-- Orchestrator & distributed lock manager
-│   ├── cluster-guard/                  <-- Safe-launch fail-safe plugin source
-│   │   ├── pom.xml
-│   │   ├── build_guard.bat             <-- Plugin compile script (Windows)
-│   │   ├── build_guard.sh              <-- Plugin compile script (Linux/macOS)
-│   │   └── src/main/java/com/cluster/guard/ClusterGuard.java
-│   └── templates/                      <-- Pre-configured operational templates
-│       ├── .stignore                   <-- Syncthing replication filter
-│       ├── config.example.json         <-- Cluster configuration template
-│       ├── run_server.bat              <-- Host startup script (Windows)
-│       └── run_server.sh               <-- Host startup script (Linux/macOS)
-│
-└── minecraft-server/                   <-- [YOUR SERVER ROOT / SYNCTHING SHARE]
-    ├── .stignore                       <-- Auto-deployed by build.bat
-    ├── config.json                     <-- Auto-deployed by build.bat (Edit with your key)
-    ├── [template]config.json           <-- Auto-deployed by build.bat for co-hosts
-    ├── run_server.bat                  <-- Auto-deployed by build.bat (Windows)
-    ├── run_server.sh                   <-- Auto-deployed by build.bat (Linux/macOS)
-    ├── ServerLauncher.jar              <-- Built & deployed by build.bat
-    ├── server.properties
-    ├── bin/
-    │   └── core.dat                    <-- Your Paper server jar renamed to core.dat
-    ├── plugins/
-    │   ├── ClusterGuard.jar            <-- Built & deployed by build.bat
-    │   └── playit-minecraft-plugin.jar <-- High-speed Anycast tunnel plugin
-    └── world/                          <-- Game save files (Overworld, Nether, End)
+mc-cluster-orchestrator/            <-- [DEV / GIT REPO]
+├── .gitignore
+├── pom.xml
+├── README.md
+├── build.bat                       <-- Compiles & auto-deploys (Windows)
+├── build.sh                        <-- Compiles & auto-deploys (Linux/macOS)
+├── force_unlock.bat                <-- Admin emergency lock release (Windows Batch)
+├── force_unlock.sh                 <-- Admin emergency lock release (Linux/macOS Bash)
+├── unlock.ps1                      <-- Admin emergency lock release (PowerShell)
+├── src/
+│   └── ServerLauncher.java         <-- Orchestrator, cloud lock manager, and sync engine
+├── cluster-guard/                  <-- Safe-launch fail-safe plugin source
+└── templates/                      <-- Operational templates deployed to server folder
+    ├── rclone-filter.txt           <-- Cloud sync filter rules
+    ├── config.example.json         <-- Cluster configuration template
+    ├── run_server.bat              <-- Host startup script (Windows)
+    ├── run_server.sh               <-- Host startup script (Linux/macOS)
+    ├── sync_pull.bat / .sh         <-- Manual inbound sync script
+    └── sync_push.bat / .sh         <-- Manual outbound sync script
+
+minecraft-server/                   <-- [SERVER RUNTIME - EXCLUDED FROM GIT]
+├── config.json                     <-- Local credentials (b2_bucket, key_id, application_key)
+├── rclone-filter.txt               <-- Excludes local binaries, cache, logs, and credentials
+├── run_server.bat / .sh            <-- Main launcher
+├── sync_pull.bat / .sh             <-- Pulls newest world from Backblaze B2
+├── sync_push.bat / .sh             <-- Pushes world to Backblaze B2 (with generation check)
+├── ServerLauncher.jar              <-- Built orchestrator binary
+├── bin/
+│   ├── core.dat                    <-- Paper server JAR renamed to core.dat
+│   └── rclone.exe                  <-- Rclone standalone binary (Windows)
+├── plugins/
+│   ├── ClusterGuard.jar            <-- Safe-launch protection plugin
+│   └── playit-minecraft-plugin.jar <-- High-speed Anycast tunnel plugin
+└── world/                          <-- Game save files (Overworld, Nether, End)
 ```
 
 ---
 
-## Setup Instructions for the Cluster Admin (Initial Setup)
-
-As the admin, you are converting an existing (or fresh) Minecraft Paper server into a distributed peer-to-peer cluster.
+## Setup Instructions for the Cluster Admin
 
 ### 1. Prerequisites (Cross-Platform)
-- **Java 21:** [Adoptium Temurin 21](https://adoptium.net/temurin/releases/?version=21) (available for Windows, macOS, and Linux).
-- **Syncthing:** [Syncthing Downloads](https://syncthing.net/downloads/)
-  - **Windows:** [SyncTrayzor](https://github.com/canton7/SyncTrayzor/releases/latest) or standard Syncthing.
-  - **macOS:** [Syncthing for macOS](https://github.com/syncthing/syncthing-macos/releases) or `brew install syncthing`.
-  - **Linux:** Install via package manager (`sudo apt install syncthing`, `pacman -S syncthing`, etc.).
-  - *Note: On all platforms, the Syncthing Web GUI is accessible at `http://127.0.0.1:8384`.*
-- A **Paper Minecraft Server Jar** (or your existing server folder).
+- **Java 21:** [Adoptium Temurin 21](https://adoptium.net/temurin/releases/?version=21) (Windows, macOS, or Linux).
+- **Rclone:**
+  - **Windows:** Download [rclone.exe](https://downloads.rclone.org/rclone-current-windows-amd64.zip) into `minecraft-server/bin/rclone.exe`.
+  - **Linux / Raspberry Pi:** `curl https://rclone.org/install.sh | sudo bash`
+  - **macOS:** `brew install rclone`
+- A free **Backblaze B2** account (10 GB free tier).
 
-### 2. Set Up the Server Folder & Core Binary
-1. In the repository root, create a folder named **`minecraft-server`** (or move your existing Minecraft server folder here and rename it to `minecraft-server`).
-   *(This folder is ignored by `.gitignore` so your world, binaries, and local configs will never be tracked by Git).*
-2. Inside `minecraft-server/`, create a subfolder named **`bin/`**.
-3. Move your Paper server JAR file into `bin/` and rename it to **`core.dat`**:
-   ```text
-   minecraft-server/bin/core.dat
-   ```
-   *(Renaming the core binary prevents accidental direct launches that bypass cluster synchronization).*
+### 2. Backblaze B2 Bucket Setup
+1. Create a **Private** bucket (e.g. `krege-B-minecraft-server`) with Object Lock disabled.
+2. Go to **Application Keys $\rightarrow$ Add a New Application Key**:
+   - Name: `mc-cluster-sync`
+   - Bucket: Restrict to your Minecraft bucket.
+   - Access: **Read and Write**.
+3. Save your `keyID` and `applicationKey`.
 
-### 3. Run the Automated Build & Deployment
-From the root of `mc-cluster-orchestrator`:
-- **Windows:**
-  ```cmd
-  .\build.bat
-  ```
-- **Linux / macOS:**
-  ```bash
-  chmod +x build.sh cluster-guard/build_guard.sh
-  ./build.sh
-  ```
-The build script automates the entire provisioning process:
-- Compiles `ServerLauncher.java` $\rightarrow$ deploys `minecraft-server/ServerLauncher.jar`.
-- Compiles `ClusterGuard` $\rightarrow$ deploys `minecraft-server/plugins/ClusterGuard.jar`.
-- **Auto-Deploys Operational Templates:** Automatically copies `run_server.bat`, `run_server.sh`, `.stignore`, `config.json`, and `[template]config.json` from `templates/` directly into `minecraft-server/` (existing configs are safely preserved).
+### 3. Build & Deploy
+From `mc-cluster-orchestrator`:
+- **Windows:** Run `build.bat`
+- **Linux / macOS:** Run `./build.sh`
 
-### 4. Configure Your Syncthing Settings
-1. Open `minecraft-server/config.json` in a text editor:
-   - In Syncthing (`http://127.0.0.1:8384`), go to **Actions $\rightarrow$ Settings $\rightarrow$ General** and copy your **API Key**.
-   - Paste it into `"api_key": "YOUR_SYNCTHING_API_KEY"`.
-   - Set `"folder_id"` to your chosen cluster sync ID (e.g. `"mc-server-cluster"`).
-   - Adjust `"java_memory"` to your allocated RAM (e.g. `"6G"`).
-2. Save and close `config.json`.
-3. In Syncthing (`http://127.0.0.1:8384`), click **Add Folder**, select your `minecraft-server/` directory, and set the **Folder ID** to match `config.json` (e.g. `mc-server-cluster`).
+### 4. Configure `minecraft-server/config.json`
+Fill in your Backblaze credentials:
+```json
+{
+  "server_jar": "bin/core.dat",
+  "java_memory": "6G",
+  "min_ram": "2G",
+  "max_ram": "6G",
+  "heartbeat_seconds": 120,
+  "stale_timeout_minutes": 10,
+  "save_interval_minutes": 15,
+  "b2_bucket": "YOUR_BUCKET_NAME",
+  "b2_key_id": "YOUR_APPLICATION_KEY_ID",
+  "b2_application_key": "YOUR_APPLICATION_KEY"
+}
+```
 
-### 5. Configure Playit.gg Ingress (One-Time)
-1. Download [`playit-minecraft-plugin.jar`](https://playit.gg/download/minecraft) and drop it into `minecraft-server/plugins/`.
-2. Start the server (Windows: `run_server.bat` | Linux/macOS: `./run_server.sh`).
-3. Check the console for the 1-click claim link:
-   ```text
-   [playit-gg]: Visit https://playit.gg/claim/xxxx to claim your server
-   ```
-4. Click the link in your browser, select **Add Tunnel $\rightarrow$ Minecraft Java**, and claim your permanent domain (e.g. `your-cluster.ply.gg`).
-5. Playit automatically saves your credentials into `plugins/playit-gg/config.yml`. Because `plugins/` is synchronized via Syncthing, your co-hosts will automatically inherit this tunnel!
+### 5. Push the World to the Cloud
+Seed the cloud with your current world and server settings:
+- **Windows:** Double-click `minecraft-server/sync_push.bat` (or run `java -jar minecraft-server/ServerLauncher.jar push`).
+- **Linux / macOS:** Run `./minecraft-server/sync_push.sh`.
+
+### 6. Package the Co-Host Starter Pack
+Generate a ready-to-send, pre-configured zip file for your co-hosts:
+- **Windows:** Double-click `create_cohost_pack.bat` in the repository root.
+- **Linux / macOS:** Run `./create_cohost_pack.sh`.
+
+This creates **`cohost-starter-pack.zip`** (~80 MB) containing all binaries, scripts, and pre-configured keys. Send this zip to your co-hosts (via Discord, Google Drive, etc.).
 
 ---
 
-## Setup Instructions for Co-Hosts (New Hosters)
+## Setup Instructions for Co-Hosts
 
-Co-hosts do not need Git, compilers, or developer tools. They simply sync the runtime files from the Admin via Syncthing.
+Co-hosts **do not** need Git, do not need to register for Backblaze, and do not compile any code. Everything is pre-assembled for them.
 
-### 1. Install Prerequisites (Cross-Platform)
-- **Java 21:** [Adoptium Temurin 21](https://adoptium.net/temurin/releases/?version=21) (Windows, macOS, or Linux).
-- **Syncthing:**
-  - **Windows:** [SyncTrayzor](https://github.com/canton7/SyncTrayzor/releases/latest)
-  - **macOS:** [Syncthing for macOS](https://github.com/syncthing/syncthing-macos/releases) or `brew install syncthing`
-  - **Linux:** Install via package manager (`sudo apt install syncthing`, `dnf install syncthing`, etc.)
-
-### 2. Connect Syncthing
-1. Open the Syncthing Web GUI (`http://127.0.0.1:8384`), go to **Actions** (top right) $\rightarrow$ **Show ID**, and send your Device ID to the Cluster Admin.
-2. Once the Admin adds you, accept the incoming folder request for **`mc-server-cluster`**.
-3. Choose a destination folder on your machine (e.g. `C:\Games\minecraft-server` or `~/minecraft-server`) and let Syncthing download the files.
-
-### 3. Create Local Configuration
-1. In your synced `minecraft-server` folder, locate `[template]config.json` (auto-deployed by the admin's build).
-2. Duplicate it and rename the copy to **`config.json`**.
-3. Open `config.json` in a text editor:
-   - In Syncthing (`http://127.0.0.1:8384`), go to **Actions $\rightarrow$ Settings $\rightarrow$ General** and copy your **API Key**.
-   - Paste it into `"api_key": "YOUR_LOCAL_SYNCTHING_API_KEY_HERE"`.
-   - Adjust `"java_memory": "6G"` to match your machine's available RAM (e.g. `4G`, `6G`, or `8G`).
-4. Save and close `config.json`.
+1. **Extract the Starter Pack:** Extract the `cohost-starter-pack.zip` sent by the Cluster Admin to any folder (e.g. `C:\minecraft-server\` or `~/minecraft-server`).
+2. **Install Java 21:** [Adoptium Temurin 21](https://adoptium.net/temurin/releases/?version=21) (Windows, macOS, or Linux).
+3. **Run the Server:**
+   - **Windows:** Double-click **`run_server.bat`**.
+   - **Linux / macOS:** Run `chmod +x *.sh && ./run_server.sh`.
+   - *Everything (`config.json` with cloud keys, `rclone.exe`, Paper core, and Playit tunnel credentials) is already configured.*
+   - On the first launch, the orchestrator connects to Backblaze B2, downloads the newest world, verifies generation, and starts hosting!
 
 ---
 
 ## Operating the Cluster
 
 ### Starting the Server
-- **Windows:** Double-click **`run_server.bat`** in `minecraft-server/`.
-- **Linux / macOS:** Run `chmod +x run_server.sh && ./run_server.sh` in `minecraft-server/`.
-
-1. The script auto-starts the Syncthing background daemon if it is not already running.
-2. `ServerLauncher` verifies no other cluster node is active and acquires `.server_active.lock`.
-3. Pre-boot synchronization confirms that all world chunks are identical to the latest host's save.
-4. The server launches and binds the permanent Playit domain.
+Run `run_server.bat` (Windows) or `./run_server.sh` (Linux/macOS):
+1. Verifies port `25565` is available.
+2. Checks cloud lock in Backblaze B2. If another co-host is active, it aborts.
+3. Acquires cloud lock.
+4. Pulls latest world changes and synchronizes generation sequence.
+5. Launches Paper server with live keyboard forwarding.
+6. Auto-saves and pushes incremental chunk snapshots every 15 minutes.
 
 ### Stopping the Server
 In the server terminal window, type:
 ```text
 stop
 ```
-The server will save all chunks, flush region files, cleanly release `.server_active.lock`, and trigger an outbound Syncthing scan to replicate your changes across the cluster.
+The orchestrator intercepts the exit, cleanly flushes Paper to disk, uploads the final state with `--update`, increments the Generation Number, and releases the cloud lock.
 
-### Administrative Tools: Emergency Lock Release
-If a host's machine abruptly crashes and a co-host needs to immediately start the server before the 10-minute stale timeout expires, the cluster admin can run:
-- **Windows Batch:** Double-click `force_unlock.bat` in the repository root.
-- **PowerShell:** Execute `.\unlock.ps1` from the repository root.
-- **Linux / macOS Bash:** Run `chmod +x force_unlock.sh && ./force_unlock.sh` from the repository root.
+### Packaging & Distributing to Co-Hosts
+As the admin, you can generate a complete, 1-click starter zip for your co-hosts anytime:
+- **Windows:** Double-click `create_cohost_pack.bat`.
+- **Linux / macOS:** Run `./create_cohost_pack.sh`.
 
-The script scans standard deployment locations, removes stranded `.server_active.lock` files, and re-opens the cluster for hosting.
+This generates `cohost-starter-pack.zip` (~80 MB) at the repository root. Send this zip to your co-hosts (via Discord, Google Drive, etc.). It includes the pre-configured `config.json`, `rclone.exe`, server core, Playit tunnel credentials, and launch scripts. When they unzip it and click `run_server.bat`, it downloads the latest world from Backblaze B2 and boots immediately.
+
+### Manual Sync Scripts
+- **`sync_pull.bat` / `.sh`:** Pulls the newest world without starting the server. (Blocked if another host is active).
+- **`sync_push.bat` / `.sh`:** Pushes local changes to the cloud. (Blocked if cloud has newer generation or is locked).
+- **`force_unlock.bat` / `.sh`:** Admin tool to clear stuck cloud and local locks if a host machine crashes.

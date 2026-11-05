@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
-# Emergency Cluster Lock Release Tool for Linux & macOS
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-FOUND=0
+cd "$(dirname "$0")"
 
-for lock in "$SCRIPT_DIR/minecraft-server/.server_active.lock" "$SCRIPT_DIR/.server_active.lock" "$SCRIPT_DIR/../minecraft-server/.server_active.lock"; do
-    if [ -f "$lock" ]; then
-        rm -f "$lock"
-        echo "[OK] Emergency cluster lock released at: $lock"
-        FOUND=1
-    fi
-done
-
-if [ "$FOUND" -eq 0 ]; then
-    echo "[INFO] No active cluster lock found (.server_active.lock)."
+echo "[Emergency Unlock] Attempting cloud and local unlock..."
+if [ -f "minecraft-server/ServerLauncher.jar" ]; then
+    java -jar "minecraft-server/ServerLauncher.jar" unlock
+elif [ -f "ServerLauncher.jar" ]; then
+    java -jar "ServerLauncher.jar" unlock
+else
+    echo "[INFO] Falling back to deleting local lock files..."
+    rm -f "minecraft-server/.server_active.lock" ".server_active.lock"
+    echo "[OK] Local locks cleared."
 fi
-

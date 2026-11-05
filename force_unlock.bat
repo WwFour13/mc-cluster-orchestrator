@@ -1,32 +1,17 @@
 @echo off
-setlocal enabledelayedexpansion
 title Emergency Cluster Unlock
 cd /d "%~dp0"
 
-set "FOUND="
-
-if exist "%~dp0minecraft-server\.server_active.lock" (
-    del /f /q "%~dp0minecraft-server\.server_active.lock"
-    echo [OK] Emergency cluster lock released in .\minecraft-server\.server_active.lock
-    set "FOUND=1"
+echo [Emergency Unlock] Attempting cloud and local unlock...
+if exist "%~dp0minecraft-server\ServerLauncher.jar" (
+    java -jar "%~dp0minecraft-server\ServerLauncher.jar" unlock
+) else if exist "%~dp0ServerLauncher.jar" (
+    java -jar "%~dp0ServerLauncher.jar" unlock
+) else (
+    echo [INFO] Falling back to deleting local lock files...
+    if exist "%~dp0minecraft-server\.server_active.lock" del /f /q "%~dp0minecraft-server\.server_active.lock"
+    if exist "%~dp0.server_active.lock" del /f /q "%~dp0.server_active.lock"
+    echo [OK] Local locks cleared.
 )
 
-if exist "%~dp0.server_active.lock" (
-    del /f /q "%~dp0.server_active.lock"
-    echo [OK] Emergency cluster lock released in .\.server_active.lock
-    set "FOUND=1"
-)
-
-if exist "%~dp0..\minecraft-server\.server_active.lock" (
-    del /f /q "%~dp0..\minecraft-server\.server_active.lock"
-    echo [OK] Emergency cluster lock released in ..\minecraft-server\.server_active.lock
-    set "FOUND=1"
-)
-
-if "!FOUND!"=="" (
-    echo [INFO] No active cluster lock found (.server_active.lock).
-)
-
-echo.
 pause
-
