@@ -228,18 +228,27 @@ public class ServerLauncher {
             }
 
             // 5. Asynchronous Heartbeat, Remote Stop Poller, & In-Game Autosave Dispatcher
-            heartbeatScheduler = Executors.newScheduledThreadPool(2);
+            heartbeatScheduler = Executors.newScheduledThreadPool(3);
 
-            // Heartbeat & Remote Stop Poller (every 30 seconds)
+            // Heartbeat timer (updates local and cloud lock every heartbeat_seconds)
             heartbeatScheduler.scheduleAtFixedRate(() -> {
                 try {
                     writeLockFile(lockPath, localHost);
                     if (hasB2) {
                         writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
-                        checkRemoteStopSignal(rootDir, rclone, b2Target, activeMcStdin);
                     }
                 } catch (Exception ignored) {}
-            }, 15, 30, TimeUnit.SECONDS);
+            }, heartbeatSec, heartbeatSec, TimeUnit.SECONDS);
+
+            // Remote Stop Signal Poller (responsive check every 30s or heartbeatSec)
+            if (hasB2) {
+                int pollSec = Math.min(30, heartbeatSec);
+                heartbeatScheduler.scheduleAtFixedRate(() -> {
+                    try {
+                        checkRemoteStopSignal(rootDir, rclone, b2Target, activeMcStdin);
+                    } catch (Exception ignored) {}
+                }, 15, pollSec, TimeUnit.SECONDS);
+            }
 
             // In-Game Autosave & Incremental Cloud Push (every saveIntervalMin)
             if (hasB2 && saveIntervalMin > 0) {
