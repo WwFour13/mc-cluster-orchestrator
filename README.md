@@ -1,6 +1,6 @@
 # Minecraft Cluster Orchestrator (v2.0)
 
-[![Release](https://img.shields.io/badge/Release-v2.0.0-emerald.svg)](https://github.com/WwFour13/mc-cluster-orchestrator/releases)
+[![Release](https://img.shields.io/badge/Release-v2.0.1-emerald.svg)](https://github.com/WwFour13/mc-cluster-orchestrator/releases)
 [![Java](https://img.shields.io/badge/Java-21%20LTS-blue.svg)](https://adoptium.net/temurin/releases/?version=21)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-orange.svg)]()
 [![Cloud Sync](https://img.shields.io/badge/Cloud%20Sync-Backblaze%20B2%20OCC-purple.svg)]()
@@ -89,7 +89,7 @@ Whenever you or an authorized co-host install a new plugin (e.g. Dynmap, Essenti
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ MINECRAFT CLUSTER v2.0.0      [ Dashboard ]  [ Cluster Admin ]  [ Settings ]│
+│ MINECRAFT CLUSTER v2.0.1      [ Dashboard ]  [ Cluster Admin ]  [ Settings ]│
 ├────────────────────────────────────────────────────────────────────────┤
 │                                                                        │
 │ Dorm Craft SMP — Shared Cluster                       ● Active on MSI  │

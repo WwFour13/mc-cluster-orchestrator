@@ -38,6 +38,7 @@
 + /plugins/**
 + /bin/**
 + /tools/**
++ /server-icon.png
 
 # Exclude any other loose files
 - *

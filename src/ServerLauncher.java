@@ -15,7 +15,7 @@ import java.util.regex.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.0.0";
+    public static final String APP_VERSION = "2.0.1";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
