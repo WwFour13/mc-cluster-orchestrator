@@ -7,8 +7,6 @@ import java.io.*;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.concurrent.*;
 
 public class ClusterGUI extends JFrame {
@@ -37,7 +35,6 @@ public class ClusterGUI extends JFrame {
     private ModernButton navDashboardBtn;
     private ModernButton navAdminBtn;
     private ModernButton navSettingsBtn;
-    private String currentActiveTab = "TAB_DASHBOARD";
 
     // Dashboard View Components
     private JLabel statusBadge;
@@ -195,7 +192,6 @@ public class ClusterGUI extends JFrame {
     }
 
     private void switchTab(String tabKey) {
-        currentActiveTab = tabKey;
         tabLayout.show(tabContainer, tabKey);
 
         navDashboardBtn.setBackgroundColor("TAB_DASHBOARD".equals(tabKey) ? COLOR_EMERALD : COLOR_BG_CARD);
