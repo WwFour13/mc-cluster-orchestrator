@@ -1,0 +1,45 @@
+# ========================================================
+# MC Cluster Orchestrator - Administrative Distribution Filter
+# Used by 'publish-update' and 'syncAdminDistribution'
+# ========================================================
+
+# Exclude local secrets, sessions, locks, and world data
+- config.json
+- [template]config.json
+- *.template.json
+- .server_active.lock
+- .cluster_session
+- cluster.lock
+- session.lock
+- **/session.lock
+- remote_stop.signal
+- /world/**
+- /backups/**
+- /cache/**
+- /logs/**
+- /.paper/**
+- /libraries/**
+- /versions/**
+- /.stversions/**
+- /.stfolder/**
+- *.update
+
+# Include runtime executables, scripts, plugins, and configs
++ /ServerLauncher.jar
++ /START_SERVER.bat
++ /START_SERVER.command
++ /Setup_Desktop_Shortcut.bat
++ /Setup_Mac_App.command
++ /rclone-filter.txt
++ /admin-dist-filter.txt
++ /server.properties
++ /spigot.yml
++ /bukkit.yml
++ /commands.yml
++ /config/**
++ /plugins/**
++ /bin/**
++ /tools/**
+
+# Exclude any other loose files
+- *

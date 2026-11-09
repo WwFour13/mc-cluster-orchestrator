@@ -9,6 +9,12 @@
 - /.stversions/**
 - /.stfolder/**
 
+# Allow orchestrator self-updates from cloud
++ /START_SERVER.bat
++ /START_SERVER.command
++ /ServerLauncher.jar.update
++ /rclone-filter.txt
+
 # Exclude local credentials, locks, metadata, and scripts
 - config.json
 - [template]config.json

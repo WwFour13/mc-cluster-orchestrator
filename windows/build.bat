@@ -107,6 +107,10 @@ if exist "%ORCH_DIR%\templates" (
         copy /y "%ORCH_DIR%\templates\rclone-filter.txt" "!TARGET_DIR!\rclone-filter.txt" >nul
         echo   [OK] Deployed rclone-filter.txt
     )
+    if exist "%ORCH_DIR%\templates\admin-dist-filter.txt" (
+        copy /y "%ORCH_DIR%\templates\admin-dist-filter.txt" "!TARGET_DIR!\admin-dist-filter.txt" >nul
+        echo   [OK] Deployed admin-dist-filter.txt
+    )
     if not exist "!TARGET_DIR!\config.json" (
         if exist "%ORCH_DIR%\templates\config.example.json" (
             copy /y "%ORCH_DIR%\templates\config.example.json" "!TARGET_DIR!\config.json" >nul

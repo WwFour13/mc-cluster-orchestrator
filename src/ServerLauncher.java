@@ -5,7 +5,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.*;
@@ -19,6 +21,7 @@ public class ServerLauncher {
     private static ScheduledExecutorService heartbeatScheduler;
     private static volatile boolean isShuttingDown = false;
     private static Process activeMcProcess = null;
+    private static Process activePlayitProcess = null;
     private static BufferedWriter activeMcStdin = null;
     private static final AtomicBoolean remoteStopTriggered = new AtomicBoolean(false);
 
@@ -56,6 +59,8 @@ public class ServerLauncher {
             int staleMin = extractJsonInt(configJson, "stale_timeout_minutes", 10);
             int heartbeatSec = extractJsonInt(configJson, "heartbeat_seconds", 120);
             int saveIntervalMin = extractJsonInt(configJson, "save_interval_minutes", 15);
+            String b2BandwidthLimit = extractJsonString(configJson, "b2_bandwidth_limit");
+            if (b2BandwidthLimit == null || b2BandwidthLimit.isEmpty()) b2BandwidthLimit = "10M";
 
             boolean hasB2 = (b2Bucket != null && !b2Bucket.isEmpty() && !b2Bucket.startsWith("YOUR_")
                     && b2KeyId != null && !b2KeyId.isEmpty() && !b2KeyId.startsWith("YOUR_")
@@ -84,7 +89,36 @@ public class ServerLauncher {
                             System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
                             return;
                         }
-                        pushToB2(rootDir, rclone, b2Target, localHost, staleMin, false);
+                        pushToB2(rootDir, rclone, b2Target, localHost, staleMin, b2BandwidthLimit, false);
+                        return;
+
+                    case "publish-update":
+                    case "publish":
+                    case "push-update":
+                        if (!hasB2) {
+                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
+                            return;
+                        }
+                        publishAdminUpdate(rootDir, rclone, b2Target);
+                        return;
+
+                    case "push-launcher":
+                        if (!hasB2) {
+                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
+                            return;
+                        }
+                        pushLauncherToB2(rootDir, rclone, b2Target);
+                        return;
+
+                    case "update":
+                        if (!hasB2) {
+                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
+                            return;
+                        }
+                        boolean hasUpdate = checkLauncherUpdate(rootDir, rclone, b2Target);
+                        if (!hasUpdate) {
+                            System.out.println("[UPDATE] ServerLauncher is already up to date.");
+                        }
                         return;
 
                     case "unlock":
@@ -141,7 +175,7 @@ public class ServerLauncher {
                         return;
 
                     default:
-                        System.err.println("[ERROR] Unknown argument: " + cmd + " (Available: pull, push, unlock, status, remote-stop, cancel-stop)");
+                        System.err.println("[ERROR] Unknown argument: " + cmd + " (Available: pull, push, publish-update, push-launcher, update, unlock, status, remote-stop, cancel-stop)");
                         return;
                 }
             }
@@ -151,6 +185,13 @@ public class ServerLauncher {
                 System.err.println("[ERROR] Server core missing! Expected at: " + coreBinaryPath);
                 System.err.println("Ensure your paper.jar is renamed to core.dat inside the 'bin' folder.");
                 return;
+            }
+
+            // 0. Pre-Flight Launcher Update Check
+            if (hasB2) {
+                if (checkLauncherUpdate(rootDir, rclone, b2Target)) {
+                    System.exit(100);
+                }
             }
 
             // 1. Port Verification
@@ -203,9 +244,10 @@ public class ServerLauncher {
             final String finalSyncthingFid = syncthingFid;
             final String finalLocalHost = localHost;
             final int finalStaleMin = staleMin;
+            final String finalBwLimit = b2BandwidthLimit;
 
             Runtime.getRuntime().addShutdownHook(new Thread(() ->
-                    cleanup(rootDir, lockPath, finalRclone, finalB2Target, finalLocalHost, finalStaleMin,
+                    cleanup(rootDir, lockPath, finalRclone, finalB2Target, finalLocalHost, finalStaleMin, finalBwLimit,
                             finalSyncthingUrl, finalSyncthingKey, finalSyncthingFid, activeMcProcess, activeMcStdin)
             ));
 
@@ -218,7 +260,8 @@ public class ServerLauncher {
 
             // 4. Pre-Boot State Convergence
             if (hasB2) {
-                System.out.println("[4/6] Pulling latest world state from Backblaze B2...");
+                System.out.println("[4/6] Synchronizing administrative distribution & latest world state...");
+                syncAdminDistribution(rootDir, rclone, b2Target);
                 pullFromB2(rootDir, rclone, b2Target, staleMin, true);
             } else if (syncthingKey != null && !syncthingKey.isEmpty() && !syncthingKey.startsWith("YOUR_")) {
                 System.out.println("[4/6] Checking Syncthing database for cluster convergence...");
@@ -253,8 +296,26 @@ public class ServerLauncher {
             // In-Game Autosave & Incremental Cloud Push (every saveIntervalMin)
             if (hasB2 && saveIntervalMin > 0) {
                 heartbeatScheduler.scheduleAtFixedRate(() -> {
-                    triggerIncrementalPush(rootDir, rclone, b2Target, activeMcStdin);
+                    triggerIncrementalPush(rootDir, rclone, b2Target, finalBwLimit, activeMcStdin);
                 }, saveIntervalMin, saveIntervalMin, TimeUnit.MINUTES);
+            }
+
+            // Standalone Playit Sidecar Tunnel Daemon
+            String playitBin = findPlayit(rootDir);
+            if (playitBin != null) {
+                System.out.println("[Playit Sidecar] Starting standalone Playit tunnel agent (" + playitBin + ")...");
+                try {
+                    ProcessBuilder playitPb = new ProcessBuilder(playitBin, "run");
+                    playitPb.directory(rootDir.toFile());
+                    playitPb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+                    playitPb.redirectError(ProcessBuilder.Redirect.INHERIT);
+                    activePlayitProcess = playitPb.start();
+                    System.out.println("[Playit Sidecar] Standalone tunnel agent active.");
+                } catch (Exception e) {
+                    System.err.println("[WARN] Failed to launch Playit sidecar: " + e.getMessage());
+                }
+            } else {
+                System.out.println("[Playit] No standalone binary found in bin/. Falling back to in-game plugin.");
             }
 
             // 6. Launch Server Process with Piped Console Forwarding
@@ -293,7 +354,7 @@ public class ServerLauncher {
             activeMcProcess.waitFor();
 
             // 7. Normal Teardown
-            cleanup(rootDir, lockPath, rclone, b2Target, localHost, staleMin,
+            cleanup(rootDir, lockPath, rclone, b2Target, localHost, staleMin, b2BandwidthLimit,
                     syncthingUrl, syncthingKey, syncthingFid, activeMcProcess, activeMcStdin);
 
         } catch (Exception e) {
@@ -303,7 +364,7 @@ public class ServerLauncher {
     }
 
     private static synchronized void cleanup(Path rootDir, Path lockPath, String rclone, String b2Target,
-                                             String host, int staleMin,
+                                             String host, int staleMin, String bwLimit,
                                              String syncthingUrl, String syncthingKey, String syncthingFid,
                                              Process mcProcess, BufferedWriter mcStdin) {
         if (isShuttingDown) return;
@@ -312,6 +373,14 @@ public class ServerLauncher {
         System.out.println("\n[6/6] Runtime terminated. Stopping background services...");
         if (heartbeatScheduler != null && !heartbeatScheduler.isShutdown()) {
             heartbeatScheduler.shutdownNow();
+        }
+
+        if (activePlayitProcess != null && activePlayitProcess.isAlive()) {
+            System.out.println("[Playit Sidecar] Stopping standalone Playit tunnel agent...");
+            try {
+                activePlayitProcess.destroy();
+                activePlayitProcess.waitFor(5, TimeUnit.SECONDS);
+            } catch (Exception ignored) {}
         }
 
         if (mcProcess != null && mcProcess.isAlive()) {
@@ -333,7 +402,7 @@ public class ServerLauncher {
         // Push final world state to Backblaze B2 with generation progression
         if (b2Target != null && !b2Target.isEmpty()) {
             System.out.println("[B2 Sync] Pushing final world and server state to Backblaze B2...");
-            pushToB2(rootDir, rclone, b2Target, host, staleMin, true);
+            pushToB2(rootDir, rclone, b2Target, host, staleMin, bwLimit, true);
             releaseCloudLock(rootDir, rclone, b2Target);
             cancelRemoteStop(rootDir, rclone, b2Target);
         }
@@ -451,7 +520,7 @@ public class ServerLauncher {
         }
     }
 
-    private static boolean pushToB2(Path rootDir, String rclone, String b2Target, String host, int staleMin, boolean isNormalTeardown) {
+    private static boolean pushToB2(Path rootDir, String rclone, String b2Target, String host, int staleMin, String bwLimit, boolean isNormalTeardown) {
         if (!isNormalTeardown && isCloudLocked(rootDir, rclone, b2Target, staleMin)) {
             return false;
         }
@@ -470,13 +539,24 @@ public class ServerLauncher {
         }
 
         Path filterPath = rootDir.resolve("rclone-filter.txt");
-        String[] cmd;
+        List<String> cmd = new ArrayList<>();
+        cmd.add(rclone);
+        cmd.add("copy");
         if (Files.exists(filterPath)) {
-            cmd = new String[]{rclone, "copy", ".", b2Target, "--filter-from", filterPath.toString(), "--fast-list", "--update"};
+            cmd.add(".");
+            cmd.add(b2Target);
+            cmd.add("--filter-from");
+            cmd.add(filterPath.toString());
         } else {
-            cmd = new String[]{rclone, "copy", "world", b2Target + "/world", "--fast-list", "--update"};
+            cmd.add("world");
+            cmd.add(b2Target + "/world");
         }
-        CommandResult res = runCommand(rootDir, cmd);
+        cmd.add("--fast-list");
+        cmd.add("--update");
+        cmd.add("--bwlimit");
+        cmd.add(bwLimit != null && !bwLimit.isEmpty() ? bwLimit : "10M");
+
+        CommandResult res = runCommand(rootDir, cmd.toArray(new String[0]));
         if (res.exitCode == 0) {
             int nextGen = Math.max(cloudGen, localGen) + 1;
             writeCloudGeneration(rootDir, rclone, b2Target, nextGen, host);
@@ -576,23 +656,144 @@ public class ServerLauncher {
         } catch (Exception ignored) {}
     }
 
-    private static void triggerIncrementalPush(Path rootDir, String rclone, String b2Target, BufferedWriter mcStdin) {
+    private static void triggerIncrementalPush(Path rootDir, String rclone, String b2Target, String bwLimit, BufferedWriter mcStdin) {
         if (mcStdin != null) {
             try {
                 synchronized (mcStdin) {
-                    mcStdin.write("save-all flush\n");
+                    mcStdin.write("save-all\n");
                     mcStdin.flush();
                 }
-                System.out.println("[Autosave] Flushed dirty chunks to disk. Dispatching incremental snapshot to B2...");
+                System.out.println("[Autosave] Initiated background chunk save. Dispatching incremental snapshot to B2...");
                 Thread.sleep(1500);
             } catch (Exception ignored) {}
         }
         CompletableFuture.runAsync(() -> {
-            CommandResult r = runCommand(rootDir, rclone, "copy", "world", b2Target + "/world", "--fast-list", "--update");
+            String limit = (bwLimit != null && !bwLimit.isEmpty()) ? bwLimit : "10M";
+            CommandResult r = runCommand(rootDir, rclone, "copy", "world", b2Target + "/world", "--fast-list", "--update", "--bwlimit", limit);
             if (r.exitCode == 0) {
                 System.out.println("[Autosave] Incremental world snapshot synced to Backblaze B2.");
             }
         });
+    }
+
+    private static String findPlayit(Path rootDir) {
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+        Path localBin = rootDir.resolve("bin").resolve(isWindows ? "playit.exe" : "playit");
+        if (Files.exists(localBin)) {
+            return localBin.toAbsolutePath().toString();
+        }
+        String cmd = isWindows ? "where" : "which";
+        try {
+            Process p = new ProcessBuilder(cmd, "playit").start();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line = r.readLine();
+                if (line != null && !line.trim().isEmpty() && Files.exists(Paths.get(line.trim()))) {
+                    return line.trim();
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private static void publishAdminUpdate(Path rootDir, String rclone, String b2Target) {
+        System.out.println("\n========================================================");
+        System.out.println("[MC Cluster] Publishing Administrative Update to Cloud...");
+        System.out.println("========================================================");
+
+        // 1. First ensure ServerLauncher.jar is pushed to root of b2Target for pre-flight launcher updates
+        Path jarPath = rootDir.resolve("ServerLauncher.jar");
+        if (Files.exists(jarPath)) {
+            System.out.println("[1/2] Updating master ServerLauncher.jar in B2...");
+            runCommand(rootDir, rclone, "copyto", jarPath.toString(), b2Target + "/ServerLauncher.jar");
+            runCommand(rootDir, rclone, "copyto", jarPath.toString(), b2Target + "/ServerLauncher.jar.update");
+        }
+
+        // 2. Push full runtime assets (plugins, core.dat, configs, daemons) to b2Target/dist
+        System.out.println("[2/2] Synchronizing runtime assets (plugins, core, configs, daemons) to B2...");
+        Path filterPath = rootDir.resolve("admin-dist-filter.txt");
+        String[] cmd;
+        if (Files.exists(filterPath)) {
+            cmd = new String[]{rclone, "copy", ".", b2Target + "/dist", "--filter-from", filterPath.toString(), "--update", "--fast-list"};
+        } else {
+            cmd = new String[]{rclone, "copy", "plugins", b2Target + "/dist/plugins", "--update", "--fast-list"};
+        }
+        CommandResult res = runCommand(rootDir, cmd);
+
+        if (res.exitCode == 0) {
+            System.out.println("\n========================================================");
+            System.out.println("[SUCCESS] Cluster update published successfully to Backblaze B2!");
+            System.out.println("  Cloud channel: " + b2Target + "/dist");
+            System.out.println("  World files, save generations, and active locks were untouched.");
+            System.out.println("  Next time any hoster boots via START_SERVER, their machine");
+            System.out.println("  will silently pull the new core, plugins, configs, and binaries.");
+            System.out.println("========================================================\n");
+        } else {
+            System.err.println("[ERROR] Failed to publish administrative update: " + res.stderr);
+        }
+    }
+
+    private static void syncAdminDistribution(Path rootDir, String rclone, String b2Target) {
+        Path filterPath = rootDir.resolve("admin-dist-filter.txt");
+        String[] cmd;
+        if (Files.exists(filterPath)) {
+            cmd = new String[]{rclone, "copy", b2Target + "/dist", ".", "--filter-from", filterPath.toString(), "--update", "--fast-list"};
+        } else {
+            cmd = new String[]{rclone, "copy", b2Target + "/dist/plugins", "plugins", "--update", "--fast-list"};
+        }
+        CommandResult res = runCommand(rootDir, cmd);
+        if (res.exitCode == 0) {
+            System.out.println("[Runtime Sync] Administrative distribution synchronized from B2.");
+        }
+    }
+
+    private static void pushLauncherToB2(Path rootDir, String rclone, String b2Target) {
+        Path jarPath = rootDir.resolve("ServerLauncher.jar");
+        if (!Files.exists(jarPath)) {
+            System.err.println("[ERROR] ServerLauncher.jar not found in " + rootDir);
+            return;
+        }
+        System.out.println("[Launcher Push] Uploading ServerLauncher.jar to Backblaze B2...");
+        CommandResult res = runCommand(rootDir, rclone, "copyto", jarPath.toString(), b2Target + "/ServerLauncher.jar");
+        if (res.exitCode == 0) {
+            System.out.println("\n========================================================");
+            System.out.println("[SUCCESS] ServerLauncher.jar successfully uploaded to B2!");
+            System.out.println("  Cloud target: " + b2Target + "/ServerLauncher.jar");
+            System.out.println("  World files, generations, and locks remain untouched.");
+            System.out.println("  Next time any hoster launches via START_SERVER, they");
+            System.out.println("  will automatically receive and run this new ServerLauncher!");
+            System.out.println("========================================================\n");
+        } else {
+            System.err.println("[ERROR] Failed to upload ServerLauncher.jar: " + res.stderr);
+        }
+    }
+
+    private static boolean checkLauncherUpdate(Path rootDir, String rclone, String b2Target) {
+        try {
+            Path updateJar = rootDir.resolve("ServerLauncher.jar.update");
+            CommandResult res = runCommand(rootDir, rclone, "copyto", b2Target + "/ServerLauncher.jar", updateJar.toString(), "--update");
+            if (res.exitCode == 0 && Files.exists(updateJar)) {
+                Path currentJar = rootDir.resolve("ServerLauncher.jar");
+                if (Files.exists(currentJar) && isSameContent(currentJar, updateJar)) {
+                    Files.deleteIfExists(updateJar);
+                    return false;
+                }
+                System.out.println("\n========================================================");
+                System.out.println("[UPDATE] Downloaded updated ServerLauncher.jar from B2!");
+                System.out.println("  Applying update and restarting launcher automatically...");
+                System.out.println("========================================================\n");
+                return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static boolean isSameContent(Path p1, Path p2) {
+        try {
+            if (Files.size(p1) != Files.size(p2)) return false;
+            return Arrays.equals(Files.readAllBytes(p1), Files.readAllBytes(p2));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static String findRclone(Path rootDir) {
