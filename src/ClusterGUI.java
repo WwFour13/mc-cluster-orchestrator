@@ -1445,7 +1445,7 @@ public class ClusterGUI extends JFrame {
         }
 
         ServerLauncher.cleanup(rootDir, lockPath, rclone, b2Target, localHost, staleMin, bwLimit,
-                null, null, null, null, null);
+                null, null);
 
         isServerRunning = false;
         SwingUtilities.invokeLater(() -> {

@@ -79,10 +79,6 @@ public class ServerLauncher {
             String javaMemory = extractJsonString(configJson, "java_memory");
             if (javaMemory == null || javaMemory.isEmpty()) javaMemory = "6G";
 
-            String syncthingUrl = extractJsonString(configJson, "api_url");
-            String syncthingKey = extractJsonString(configJson, "api_key");
-            String syncthingFid = extractJsonString(configJson, "folder_id");
-
             int staleMin = extractJsonInt(configJson, "stale_timeout_minutes", 10);
             int heartbeatSec = extractJsonInt(configJson, "heartbeat_seconds", 120);
             int saveIntervalMin = extractJsonInt(configJson, "save_interval_minutes", 15);
@@ -266,16 +262,13 @@ public class ServerLauncher {
             // Register Graceful Shutdown Hook
             final String finalB2Target = b2Target;
             final String finalRclone = rclone;
-            final String finalSyncthingUrl = syncthingUrl;
-            final String finalSyncthingKey = syncthingKey;
-            final String finalSyncthingFid = syncthingFid;
             final String finalLocalHost = localHost;
             final int finalStaleMin = staleMin;
             final String finalBwLimit = b2BandwidthLimit;
 
             Runtime.getRuntime().addShutdownHook(new Thread(() ->
                     cleanup(rootDir, lockPath, finalRclone, finalB2Target, finalLocalHost, finalStaleMin, finalBwLimit,
-                            finalSyncthingUrl, finalSyncthingKey, finalSyncthingFid, activeMcProcess, activeMcStdin)
+                            activeMcProcess, activeMcStdin)
             ));
 
             // Dynamic DNS (if DuckDNS configured)
@@ -290,9 +283,6 @@ public class ServerLauncher {
                 System.out.println("[4/6] Synchronizing administrative distribution & latest world state...");
                 syncAdminDistribution(rootDir, rclone, b2Target);
                 pullFromB2(rootDir, rclone, b2Target, staleMin, true);
-            } else if (syncthingKey != null && !syncthingKey.isEmpty() && !syncthingKey.startsWith("YOUR_")) {
-                System.out.println("[4/6] Checking Syncthing database for cluster convergence...");
-                waitForSyncthing(syncthingUrl, syncthingKey, syncthingFid, "Pre-boot sync", 120);
             } else {
                 System.out.println("[4/6] No cloud sync provider configured. Running in local standalone mode.");
             }
@@ -373,7 +363,7 @@ public class ServerLauncher {
 
             // 7. Normal Teardown
             cleanup(rootDir, lockPath, rclone, b2Target, localHost, staleMin, b2BandwidthLimit,
-                    syncthingUrl, syncthingKey, syncthingFid, activeMcProcess, activeMcStdin);
+                    activeMcProcess, activeMcStdin);
 
         } catch (Exception e) {
             System.err.println("[ERROR] Fatal exception in orchestrator runtime: " + e.getMessage());
@@ -383,7 +373,6 @@ public class ServerLauncher {
 
     public static synchronized void cleanup(Path rootDir, Path lockPath, String rclone, String b2Target,
                                              String host, int staleMin, String bwLimit,
-                                             String syncthingUrl, String syncthingKey, String syncthingFid,
                                              Process mcProcess, BufferedWriter mcStdin) {
         if (isShuttingDown) return;
         isShuttingDown = true;
@@ -423,19 +412,6 @@ public class ServerLauncher {
             pushToB2(rootDir, rclone, b2Target, host, staleMin, bwLimit, true);
             releaseCloudLock(rootDir, rclone, b2Target);
             cancelRemoteStop(rootDir, rclone, b2Target);
-        }
-
-        // Syncthing Fallback (if active)
-        if (syncthingKey != null && !syncthingKey.isEmpty() && !syncthingKey.startsWith("YOUR_")) {
-            try {
-                HttpRequest scanReq = HttpRequest.newBuilder()
-                        .uri(URI.create(syncthingUrl + "/rest/db/scan?folder=" + syncthingFid))
-                        .header("X-API-Key", syncthingKey)
-                        .POST(HttpRequest.BodyPublishers.noBody())
-                        .build();
-                HTTP_CLIENT.send(scanReq, HttpResponse.BodyHandlers.discarding());
-            } catch (Exception ignored) {}
-            waitForSyncthing(syncthingUrl, syncthingKey, syncthingFid, "Outbound sync", 60);
         }
 
         try {
@@ -988,51 +964,6 @@ public class ServerLauncher {
         } catch (Exception e) {
             System.err.println("[DNS] Network failure during DNS propagation: " + e.getMessage());
         }
-    }
-
-    public static void waitForSyncthing(String url, String key, String fid, String stage, int timeoutSec) {
-        if (url == null || url.isEmpty() || key == null || key.isEmpty() || key.startsWith("YOUR_")) {
-            return;
-        }
-        System.out.printf("[Syncthing] Monitoring replication state (%s)...%n", stage);
-        int elapsed = 0;
-        String statusUri = url + "/rest/db/status?folder=" + fid;
-
-        while (elapsed < timeoutSec) {
-            try {
-                HttpRequest req = HttpRequest.newBuilder()
-                        .uri(URI.create(statusUri))
-                        .header("X-API-Key", key)
-                        .GET()
-                        .timeout(Duration.ofSeconds(3))
-                        .build();
-
-                HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-                String body = resp.body();
-
-                String state = extractJsonString(body, "state");
-                long needBytes = extractJsonLong(body, "needBytes", -1);
-
-                if ("idle".equalsIgnoreCase(state) && needBytes == 0) {
-                    System.out.println("[Syncthing] Folder state converged: 100% synchronized.");
-                    return;
-                }
-
-                System.out.printf("[Syncthing] Current State: %s | Inbound Delta: %.2f MB...%n",
-                        state, needBytes > 0 ? (needBytes / (1024.0 * 1024.0)) : 0.0);
-
-            } catch (Exception e) {
-                if (elapsed == 0) {
-                    System.out.printf("[Syncthing] Daemon not reachable at %s. Skipping replication wait.%n", url);
-                    return;
-                }
-                System.out.println("[Syncthing] Awaiting daemon response...");
-            }
-
-            try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
-            elapsed += 3;
-        }
-        System.out.println("[WARN] Replication polling reached timeout ceiling. Continuing execution.");
     }
 
     public static String extractJsonString(String json, String key) {

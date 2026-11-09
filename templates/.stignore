@@ -1,8 +1,0 @@
-logs/
-crash-reports/
-*.log.gz
-session.lock
-cache/
-.stversions/
-config.json
-

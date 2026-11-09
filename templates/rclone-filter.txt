@@ -6,8 +6,6 @@
 - /.paper/**
 - /libraries/**
 - /versions/**
-- /.stversions/**
-- /.stfolder/**
 
 # Allow orchestrator self-updates from cloud
 + /START_SERVER.bat
@@ -21,7 +19,6 @@
 - *.template.json
 - .server_active.lock
 - .cluster_session
-- .stignore
 - cluster.lock
 - session.lock
 - **/session.lock

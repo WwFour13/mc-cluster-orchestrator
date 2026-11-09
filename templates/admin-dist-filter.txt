@@ -20,8 +20,6 @@
 - /.paper/**
 - /libraries/**
 - /versions/**
-- /.stversions/**
-- /.stfolder/**
 - *.update
 
 # Include runtime executables, scripts, plugins, and configs
