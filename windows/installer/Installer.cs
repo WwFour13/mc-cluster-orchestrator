@@ -22,7 +22,7 @@ namespace MinecraftClusterInstaller
         private Button installBtn;
         private Button cancelBtn;
 
-        private const string GITHUB_REPO = "tavgu/mc-cluster-orchestrator";
+        private const string GITHUB_REPO = "WwFour13/mc-cluster-orchestrator";
         private string targetDirectory;
 
         [STAThread]

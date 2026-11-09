@@ -6,7 +6,7 @@ echo "        MINECRAFT CLUSTER ORCHESTRATOR INSTALLER"
 echo "========================================================"
 echo ""
 
-GITHUB_REPO="tavgu/mc-cluster-orchestrator"
+GITHUB_REPO="WwFour13/mc-cluster-orchestrator"
 INSTALL_DIR="$HOME/minecraft-cluster"
 
 # 1. Java 21 Check & Auto-Install

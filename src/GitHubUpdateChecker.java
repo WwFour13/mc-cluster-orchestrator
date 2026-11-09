@@ -9,7 +9,7 @@ import java.util.regex.*;
 
 public class GitHubUpdateChecker {
 
-    public static final String DEFAULT_REPO = "tavgu/mc-cluster-orchestrator";
+    public static final String DEFAULT_REPO = "WwFour13/mc-cluster-orchestrator";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(6))

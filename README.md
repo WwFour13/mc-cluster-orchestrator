@@ -1,6 +1,6 @@
 # Minecraft Cluster Orchestrator (v2.0)
 
-[![Release](https://img.shields.io/badge/Release-v2.0.0-emerald.svg)](https://github.com/tavgu/mc-cluster-orchestrator/releases)
+[![Release](https://img.shields.io/badge/Release-v2.0.0-emerald.svg)](https://github.com/WwFour13/mc-cluster-orchestrator/releases)
 [![Java](https://img.shields.io/badge/Java-21%20LTS-blue.svg)](https://adoptium.net/temurin/releases/?version=21)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-orange.svg)]()
 [![Cloud Sync](https://img.shields.io/badge/Cloud%20Sync-Backblaze%20B2%20OCC-purple.svg)]()
@@ -33,12 +33,12 @@ A distributed, fail-safe Minecraft server orchestrator. Coordinates 24/7 multipl
 Co-hosts do not need Git, do not need to register for Backblaze, and do not compile code.
 
 ### 1. Download the Installer
-Download the package for your operating system from [GitHub Releases](https://github.com/tavgu/mc-cluster-orchestrator/releases/latest):
+Download the package for your operating system from [GitHub Releases](https://github.com/WwFour13/mc-cluster-orchestrator/releases/latest):
 * **Windows:** Download and run `MinecraftClusterSetup.exe`.
 * **macOS:** Download `Minecraft-Cluster-macOS.zip`, unzip, and drag `Minecraft Cluster Server.app` to your Applications or Desktop.
 * **Linux:** Run the bootstrap command in your terminal:
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/tavgu/mc-cluster-orchestrator/master/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/WwFour13/mc-cluster-orchestrator/master/install.sh | bash
   ```
 
 ### 2. Connect to the Cluster
