@@ -10,6 +10,7 @@ $scDesk = $wsh.CreateShortcut((Join-Path $desktop "Minecraft Cluster Server.lnk"
 $scDesk.TargetPath = $env:ComSpec
 $scDesk.Arguments = "/c `"`"$targetBat`"`""
 $scDesk.WorkingDirectory = $serverDir
+$scDesk.WindowStyle = 7
 if (Test-Path $iconPath) { $scDesk.IconLocation = "$iconPath,0" }
 $scDesk.Description = "Start the Minecraft Cluster Server"
 $scDesk.Save()
@@ -19,6 +20,7 @@ $scStart = $wsh.CreateShortcut((Join-Path $programs "Minecraft Cluster Server.ln
 $scStart.TargetPath = $env:ComSpec
 $scStart.Arguments = "/c `"`"$targetBat`"`""
 $scStart.WorkingDirectory = $serverDir
+$scStart.WindowStyle = 7
 if (Test-Path $iconPath) { $scStart.IconLocation = "$iconPath,0" }
 $scStart.Description = "Start the Minecraft Cluster Server"
 $scStart.Save()

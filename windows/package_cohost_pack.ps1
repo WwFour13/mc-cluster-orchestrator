@@ -68,6 +68,9 @@ try {
     # Launchers & Tools for Windows
     Copy-Item -Path "$TemplatesDir\windows\START_SERVER.bat" -Destination $targetWin -Force
     Copy-Item -Path "$TemplatesDir\windows\Setup_Desktop_Shortcut.bat" -Destination $targetWin -Force
+    if (Test-Path "$TemplatesDir\windows\Install_Minecraft_Cluster.bat") {
+        Copy-Item -Path "$TemplatesDir\windows\Install_Minecraft_Cluster.bat" -Destination $targetWin -Force
+    }
     $toolsDir = Join-Path $targetWin "tools"
     New-Item -ItemType Directory -Path $toolsDir | Out-Null
     Copy-Item -Path "$TemplatesDir\windows\tools\*" -Destination $toolsDir -Force
@@ -104,6 +107,9 @@ try {
     # Launchers & Tools for Mac
     Copy-Item -Path "$TemplatesDir\mac-linux\START_SERVER.command" -Destination $targetMac -Force
     Copy-Item -Path "$TemplatesDir\mac-linux\Setup_Mac_App.command" -Destination $targetMac -Force
+    if (Test-Path "$TemplatesDir\mac-linux\Install_Minecraft_Cluster.command") {
+        Copy-Item -Path "$TemplatesDir\mac-linux\Install_Minecraft_Cluster.command" -Destination $targetMac -Force
+    }
     $toolsDir = Join-Path $targetMac "tools"
     New-Item -ItemType Directory -Path $toolsDir | Out-Null
     Copy-Item -Path "$TemplatesDir\mac-linux\tools\*" -Destination $toolsDir -Force

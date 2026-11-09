@@ -32,17 +32,21 @@ if not exist "!TARGET_DIR!" (
     mkdir "!TARGET_DIR!"
 )
 
-:: 3. Compile ServerLauncher.java
-echo [1/3] Compiling ServerLauncher.java...
+:: 3. Compile Java Sources
+echo [1/3] Compiling Java source files...
 if exist "%ORCH_DIR%\build_out" rd /s /q "%ORCH_DIR%\build_out"
 mkdir "%ORCH_DIR%\build_out\META-INF"
 
-"%JAVAC_BIN%" -encoding UTF-8 -d "%ORCH_DIR%\build_out" "%ORCH_DIR%\src\ServerLauncher.java"
-if %ERRORLEVEL% neq 0 (
+dir /b /s "%ORCH_DIR%\src\*.java" > "%ORCH_DIR%\sources.txt"
+"%JAVAC_BIN%" -encoding UTF-8 -d "%ORCH_DIR%\build_out" @"%ORCH_DIR%\sources.txt"
+set "COMPILE_STATUS=%ERRORLEVEL%"
+if exist "%ORCH_DIR%\sources.txt" del "%ORCH_DIR%\sources.txt"
+
+if !COMPILE_STATUS! neq 0 (
     echo [ERROR] Compilation failed.
     rd /s /q "%ORCH_DIR%\build_out"
     pause
-    exit /b %ERRORLEVEL%
+    exit /b !COMPILE_STATUS!
 )
 
 :: 4. Write Manifest & Package ServerLauncher.jar
@@ -87,9 +91,11 @@ if exist "%ORCH_DIR%\templates" (
     :: Deploy launchers to root
     if exist "%ORCH_DIR%\templates\windows\START_SERVER.bat" copy /y "%ORCH_DIR%\templates\windows\START_SERVER.bat" "!TARGET_DIR!\START_SERVER.bat" >nul
     if exist "%ORCH_DIR%\templates\windows\Setup_Desktop_Shortcut.bat" copy /y "%ORCH_DIR%\templates\windows\Setup_Desktop_Shortcut.bat" "!TARGET_DIR!\Setup_Desktop_Shortcut.bat" >nul
+    if exist "%ORCH_DIR%\templates\windows\Install_Minecraft_Cluster.bat" copy /y "%ORCH_DIR%\templates\windows\Install_Minecraft_Cluster.bat" "!TARGET_DIR!\Install_Minecraft_Cluster.bat" >nul
     if exist "%ORCH_DIR%\templates\mac-linux\START_SERVER.command" copy /y "%ORCH_DIR%\templates\mac-linux\START_SERVER.command" "!TARGET_DIR!\START_SERVER.command" >nul
     if exist "%ORCH_DIR%\templates\mac-linux\Setup_Mac_App.command" copy /y "%ORCH_DIR%\templates\mac-linux\Setup_Mac_App.command" "!TARGET_DIR!\Setup_Mac_App.command" >nul
-    echo   [OK] Deployed primary launchers (START_SERVER and Shortcut Setups)
+    if exist "%ORCH_DIR%\templates\mac-linux\Install_Minecraft_Cluster.command" copy /y "%ORCH_DIR%\templates\mac-linux\Install_Minecraft_Cluster.command" "!TARGET_DIR!\Install_Minecraft_Cluster.command" >nul
+    echo   [OK] Deployed primary launchers and installers
 
     :: Deploy tools/ folder
     if not exist "!TARGET_DIR!\tools" mkdir "!TARGET_DIR!\tools"
