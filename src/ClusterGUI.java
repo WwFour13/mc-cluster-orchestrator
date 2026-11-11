@@ -3,6 +3,8 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
 import java.awt.*;
 import java.awt.event.*;
+import java.awt.font.GlyphVector;
+import java.awt.geom.Rectangle2D;
 import java.io.*;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
@@ -22,6 +24,7 @@ public class ClusterGUI extends JFrame {
     public static final Color COLOR_BLUE = new Color(59, 130, 246);        // Blue #3b82f6
     public static final Color COLOR_ROSE = new Color(239, 68, 68);         // Crimson #ef4444
     public static final Color COLOR_AMBER = new Color(245, 158, 11);       // Amber #f59e0b
+    public static final Color COLOR_PURPLE = new Color(139, 92, 246);      // Violet #8b5cf6
 
     private Path rootDir;
     private final ClusterRegistry clusterRegistry;
@@ -592,7 +595,7 @@ public class ClusterGUI extends JFrame {
         ModernCard starterPackCard = new ModernCard();
         starterPackCard.setLayout(new BorderLayout(10, 8));
         starterPackCard.setBorder(new EmptyBorder(14, 18, 14, 18));
-        starterPackCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 125));
+        starterPackCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 135));
 
         JLabel starterTitle = new JLabel("COHOST STARTER PACK (ZERO CLOUD EGRESS)");
         starterTitle.setFont(new Font("Segoe UI", Font.BOLD, 13));
@@ -602,18 +605,19 @@ public class ClusterGUI extends JFrame {
         starterDesc.setFont(new Font("Segoe UI", Font.PLAIN, 12));
         starterDesc.setForeground(COLOR_TEXT_MUTED);
 
-        JPanel starterActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        JPanel starterActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         starterActions.setOpaque(false);
 
         ModernButton exportZipBtn = new ModernButton("📦 EXPORT STARTER PACK (.zip)", COLOR_EMERALD, Color.WHITE, 12, 8);
-        exportZipBtn.setPreferredSize(new Dimension(240, 36));
+        exportZipBtn.setPreferredSize(new Dimension(240, 42));
         exportZipBtn.addActionListener(e -> exportStarterPackAction());
 
         ModernButton importZipBtn = new ModernButton("📁 IMPORT STARTER PACK (.zip)", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 8);
-        importZipBtn.setPreferredSize(new Dimension(240, 36));
+        importZipBtn.setPreferredSize(new Dimension(240, 42));
         importZipBtn.addActionListener(e -> showImportClusterDialog());
 
         starterActions.add(exportZipBtn);
+        starterActions.add(Box.createHorizontalStrut(12));
         starterActions.add(importZipBtn);
 
         starterPackCard.add(starterTitle, BorderLayout.NORTH);
@@ -622,9 +626,9 @@ public class ClusterGUI extends JFrame {
 
         // Section 2: Operational Controls (Remote Stop, Force Unlock, & Cloud Config Sync)
         ModernCard opsCard = new ModernCard();
-        opsCard.setLayout(new GridLayout(3, 1, 0, 10));
+        opsCard.setLayout(new GridLayout(4, 1, 0, 10));
         opsCard.setBorder(new EmptyBorder(14, 18, 14, 18));
-        opsCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 195));
+        opsCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 260));
 
         // Sub-Card A: Remote Stop
         JPanel stopRow = new JPanel(new BorderLayout(12, 0));
@@ -689,9 +693,31 @@ public class ClusterGUI extends JFrame {
         syncDistRow.add(adminSyncDistBtn, BorderLayout.WEST);
         syncDistRow.add(syncDistInfo, BorderLayout.CENTER);
 
+        // Sub-Card D: Cloud Storage Cleanup
+        JPanel cleanStorageRow = new JPanel(new BorderLayout(12, 0));
+        cleanStorageRow.setOpaque(false);
+        ModernButton adminCleanStorageBtn = new ModernButton("🧹 CLEAN CLOUD STORAGE", COLOR_PURPLE, Color.WHITE, 12, 8);
+        adminCleanStorageBtn.setPreferredSize(new Dimension(240, 42));
+        adminCleanStorageBtn.addActionListener(e -> handleCleanStorage(adminCleanStorageBtn));
+
+        JPanel cleanStorageInfo = new JPanel(new GridLayout(2, 1, 0, 2));
+        cleanStorageInfo.setOpaque(false);
+        JLabel cleanStorageTitle = new JLabel("Purge Dead Chunk Revisions & Free Storage");
+        cleanStorageTitle.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        cleanStorageTitle.setForeground(COLOR_TEXT_PRIMARY);
+        JLabel cleanStorageDesc = new JLabel("Deletes hidden superseded chunk revisions on B2, preserving the latest active save.");
+        cleanStorageDesc.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        cleanStorageDesc.setForeground(COLOR_TEXT_MUTED);
+        cleanStorageInfo.add(cleanStorageTitle);
+        cleanStorageInfo.add(cleanStorageDesc);
+
+        cleanStorageRow.add(adminCleanStorageBtn, BorderLayout.WEST);
+        cleanStorageRow.add(cleanStorageInfo, BorderLayout.CENTER);
+
         opsCard.add(stopRow);
         opsCard.add(unlockRow);
         opsCard.add(syncDistRow);
+        opsCard.add(cleanStorageRow);
 
         // Section 3: World State & Storage Shortcuts
         ModernCard stateCard = new ModernCard();
@@ -1945,6 +1971,64 @@ public class ClusterGUI extends JFrame {
         });
     }
 
+    private void handleCleanStorage(ModernButton btn) {
+        int confirm = JOptionPane.showConfirmDialog(this,
+                "This will purge all hidden and superseded chunk revisions from Backblaze B2.\n" +
+                "The current live save state and world files remain completely safe and untouched.\n\n" +
+                "Proceed with Cloud Storage Cleanup?",
+                "Purge Dead Revisions", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (confirm != JOptionPane.YES_OPTION) return;
+
+        btn.setEnabled(false);
+        btn.setText("CLEANING...");
+        appendConsoleLog("[B2 MAINTENANCE] Starting storage cleanup on Backblaze B2...");
+
+        workerPool.submit(() -> {
+            try {
+                Path cfg = rootDir.resolve("config.json");
+                if (!Files.exists(cfg)) {
+                    appendConsoleLog("[ERROR] config.json missing. Cannot determine cluster target.");
+                    return;
+                }
+                String json = Files.readString(cfg);
+                String bucket = ServerLauncher.extractJsonString(json, "b2_bucket");
+                String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
+                String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
+                String rclone = ServerLauncher.findRclone(rootDir);
+                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+
+                ServerLauncher.CommandResult res = ServerLauncher.purgeDeadRevisions(rootDir, rclone, b2Target);
+                if (res.exitCode() == 0) {
+                    appendConsoleLog("[B2 MAINTENANCE] Bucket cleaned successfully! Dead revisions purged.");
+                    SwingUtilities.invokeLater(() -> {
+                        btn.setText("CLEANED!");
+                        JOptionPane.showMessageDialog(this,
+                                "Storage cleanup complete!\nAll hidden chunk revisions have been purged while preserving the latest save.",
+                                "Storage Cleaned", JOptionPane.INFORMATION_MESSAGE);
+                        Timer t = new Timer(2000, ev -> {
+                            btn.setText("🧹 CLEAN CLOUD STORAGE");
+                            btn.setEnabled(true);
+                        });
+                        t.setRepeats(false);
+                        t.start();
+                    });
+                } else {
+                    appendConsoleLog("[ERROR] Cleanup failed (code " + res.exitCode() + "): " + res.stderr());
+                    SwingUtilities.invokeLater(() -> {
+                        btn.setText("RETRY CLEAN");
+                        btn.setEnabled(true);
+                    });
+                }
+            } catch (Exception ex) {
+                appendConsoleLog("[ERROR] Cleanup failed: " + ex.getMessage());
+                SwingUtilities.invokeLater(() -> {
+                    btn.setText("RETRY CLEAN");
+                    btn.setEnabled(true);
+                });
+            }
+        });
+    }
+
     private void initGitHubUpdatePolling() {
         GitHubUpdateChecker.checkAsync(ServerLauncher.APP_VERSION, GitHubUpdateChecker.DEFAULT_REPO)
                 .thenAccept(info -> {
@@ -2382,12 +2466,15 @@ public class ClusterGUI extends JFrame {
         private Color hoverColor;
         private final int radius;
         private boolean isHovered = false;
+        private String icon = "";
+        private String label = "";
 
         public ModernButton(String text, Color bg, Color fg, int fontSize, int radius) {
             super(text);
             this.bgColor = bg;
             this.hoverColor = lighten(bg, 1.15f);
             this.radius = radius;
+            parseText(text);
 
             setFont(new Font("Segoe UI", Font.BOLD, fontSize));
             setForeground(fg);
@@ -2411,6 +2498,36 @@ public class ClusterGUI extends JFrame {
             });
         }
 
+        @Override
+        public void setText(String text) {
+            super.setText(text);
+            parseText(text);
+            repaint();
+        }
+
+        private void parseText(String raw) {
+            if (raw == null || raw.isEmpty()) {
+                this.icon = "";
+                this.label = "";
+                return;
+            }
+            int firstCp = raw.codePointAt(0);
+            int charCount = Character.charCount(firstCp);
+            if (firstCp >= 0x2000 || Character.isSurrogate(raw.charAt(0))) {
+                String iconStr = new String(Character.toChars(firstCp));
+                int nextIdx = charCount;
+                if (nextIdx < raw.length() && raw.charAt(nextIdx) == '\uFE0F') {
+                    iconStr += "\uFE0F";
+                    nextIdx++;
+                }
+                this.icon = iconStr;
+                this.label = raw.substring(nextIdx).trim();
+            } else {
+                this.icon = "";
+                this.label = raw;
+            }
+        }
+
         public void setBackgroundColor(Color c) {
             this.bgColor = c;
             this.hoverColor = lighten(c, 1.15f);
@@ -2428,11 +2545,46 @@ public class ClusterGUI extends JFrame {
             g2.fillRoundRect(0, 0, getWidth(), getHeight(), radius, radius);
 
             g2.setColor(isEnabled() ? getForeground() : COLOR_TEXT_MUTED);
-            FontMetrics fm = g2.getFontMetrics(getFont());
-            int x = (getWidth() - fm.stringWidth(getText())) / 2;
-            int y = (getHeight() + fm.getAscent() - fm.getDescent()) / 2;
-            g2.setFont(getFont());
-            g2.drawString(getText(), x, y);
+
+            Font textFont = getFont();
+            Font emojiFont = new Font("Segoe UI Emoji", Font.PLAIN, textFont.getSize() + 1);
+            FontMetrics fmText = g2.getFontMetrics(textFont);
+            FontMetrics fmEmoji = g2.getFontMetrics(emojiFont);
+
+            boolean hasIcon = (icon != null && !icon.isEmpty());
+            boolean hasLabel = (label != null && !label.isEmpty());
+
+            if (hasIcon && hasLabel) {
+                int iconW = fmEmoji.stringWidth(icon);
+                int labelW = fmText.stringWidth(label);
+                int spacing = 8;
+                int totalW = iconW + spacing + labelW;
+                int startX = Math.max(4, (getWidth() - totalW) / 2);
+
+                GlyphVector gv = textFont.createGlyphVector(g2.getFontRenderContext(), label);
+                Rectangle2D vb = gv.getVisualBounds();
+                int textY = (int) Math.round((getHeight() - vb.getHeight()) / 2.0 - vb.getY());
+
+                g2.setFont(emojiFont);
+                g2.drawString(icon, startX, textY);
+
+                g2.setFont(textFont);
+                g2.drawString(label, startX + iconW + spacing, textY);
+            } else if (hasLabel) {
+                GlyphVector gv = textFont.createGlyphVector(g2.getFontRenderContext(), label);
+                Rectangle2D vb = gv.getVisualBounds();
+                int startX = Math.max(4, (int) Math.round((getWidth() - vb.getWidth()) / 2.0 - vb.getX()));
+                int textY = (int) Math.round((getHeight() - vb.getHeight()) / 2.0 - vb.getY());
+
+                g2.setFont(textFont);
+                g2.drawString(label, startX, textY);
+            } else if (hasIcon) {
+                int iconW = fmEmoji.stringWidth(icon);
+                int startX = (getWidth() - iconW) / 2;
+                int textY = (getHeight() + fmEmoji.getAscent() - fmEmoji.getDescent()) / 2;
+                g2.setFont(emojiFont);
+                g2.drawString(icon, startX, textY);
+            }
 
             g2.dispose();
         }

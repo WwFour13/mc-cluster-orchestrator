@@ -16,7 +16,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.0";
+    public static final String APP_VERSION = "2.1.1";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -52,7 +52,7 @@ public class ServerLauncher {
             String cmd = args[0].toLowerCase();
             isSubcommand = switch (cmd) {
                 case "pull", "push", "publish-update", "publish", "push-update", "push-launcher",
-                     "update", "unlock", "remote-stop", "cancel-stop", "status", "export-starterpack", "import-starterpack" -> true;
+                     "update", "unlock", "remote-stop", "cancel-stop", "status", "export-starterpack", "import-starterpack", "cleanup" -> true;
                 default -> false;
             };
         }
@@ -216,6 +216,14 @@ public class ServerLauncher {
                                 System.out.printf("Public Tunnel Ping (%s): OFFLINE%n", statusAddr);
                             }
                         }
+                        return;
+
+                    case "cleanup":
+                        if (!hasB2) {
+                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
+                            return;
+                        }
+                        purgeDeadRevisions(rootDir, rclone, b2Target);
                         return;
 
                     case "export-starterpack":
@@ -484,9 +492,14 @@ public class ServerLauncher {
         // Push final world state to Backblaze B2 with generation progression
         if (b2Target != null && !b2Target.isEmpty()) {
             System.out.println("[B2 Sync] Pushing final world and server state to Backblaze B2...");
-            pushToB2(rootDir, rclone, b2Target, host, staleMin, bwLimit, true);
+            boolean pushed = pushToB2(rootDir, rclone, b2Target, host, staleMin, bwLimit, true);
             releaseCloudLock(rootDir, rclone, b2Target);
             cancelRemoteStop(rootDir, rclone, b2Target);
+            if (pushed) {
+                // Autonomous Storage Hygiene: Purge dead chunk revisions so buckets never bloat.
+                // rclone cleanup only purges hidden/superseded file revisions; the live save version is preserved.
+                purgeDeadRevisions(rootDir, rclone, b2Target);
+            }
         }
 
         try {
@@ -963,6 +976,22 @@ public class ServerLauncher {
 
     public static String getB2Remote(String bucket, String keyId, String appKey) {
         return String.format(":b2,account=\"%s\",key=\"%s\":%s/server", keyId, appKey, bucket);
+    }
+
+    public static CommandResult purgeDeadRevisions(Path rootDir, String rclone, String b2Target) {
+        if (b2Target == null || b2Target.isEmpty()) {
+            System.err.println("[B2 Maintenance] Aborted: No Backblaze B2 target configured.");
+            return new CommandResult(1, "", "No B2 target configured.");
+        }
+        System.out.println("[B2 Maintenance] Purging hidden chunk revisions & dead file versions...");
+        System.out.println("  (Latest save state and active world remain 100% untouched)");
+        CommandResult res = runCommand(rootDir, rclone, "cleanup", b2Target);
+        if (res.exitCode == 0) {
+            System.out.println("[B2 Maintenance] Cloud bucket storage cleaned successfully. Dead revisions purged.");
+        } else {
+            System.err.println("[B2 Maintenance] Cleanup notice: " + res.stderr);
+        }
+        return res;
     }
 
     public static CommandResult runCommand(Path workingDir, String... command) {
