@@ -12,10 +12,11 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.*;
+import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.0.1";
+    public static final String APP_VERSION = "2.1.0";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -31,7 +32,12 @@ public class ServerLauncher {
     public static record CommandResult(int exitCode, String stdout, String stderr) {}
 
     public static void main(String[] args) {
-        Path rootDir = Paths.get("").toAbsolutePath();
+        Path baseDir = Paths.get("").toAbsolutePath();
+        if (!Files.exists(baseDir.resolve("config.json")) && Files.exists(baseDir.resolve("minecraft-server").resolve("config.json"))) {
+            baseDir = baseDir.resolve("minecraft-server");
+        }
+        ClusterRegistry registry = ClusterRegistry.getInstance(baseDir);
+        Path activeRoot = registry.getActiveClusterPath(baseDir);
 
         boolean forceCli = false;
         for (String a : args) {
@@ -46,15 +52,17 @@ public class ServerLauncher {
             String cmd = args[0].toLowerCase();
             isSubcommand = switch (cmd) {
                 case "pull", "push", "publish-update", "publish", "push-update", "push-launcher",
-                     "update", "unlock", "remote-stop", "cancel-stop", "status" -> true;
+                     "update", "unlock", "remote-stop", "cancel-stop", "status", "export-starterpack", "import-starterpack" -> true;
                 default -> false;
             };
         }
 
         if (!forceCli && !isSubcommand && !GraphicsEnvironment.isHeadless()) {
-            ClusterGUI.launch(rootDir);
+            ClusterGUI.launch(activeRoot);
             return;
         }
+
+        final Path rootDir = activeRoot;
 
         Path configPath = rootDir.resolve("config.json");
         Path lockPath = rootDir.resolve(".server_active.lock");
@@ -195,10 +203,38 @@ public class ServerLauncher {
                         } else {
                             System.out.println("Local Lock File: None");
                         }
+                        String statusAddr = extractJsonString(configJson, "server_address");
+                        if (statusAddr == null || statusAddr.isEmpty()) {
+                            statusAddr = extractJsonString(configJson, "domain");
+                            if (statusAddr != null && !statusAddr.isEmpty()) statusAddr += ".duckdns.org";
+                        }
+                        if (statusAddr != null && !statusAddr.isEmpty()) {
+                            PingResult pr = pingMinecraftServer(statusAddr);
+                            if (pr.isOnline) {
+                                System.out.printf("Public Tunnel Ping (%s): LIVE (%d/%d online | MOTD: %s)%n", statusAddr, pr.onlinePlayers, pr.maxPlayers, pr.motd);
+                            } else {
+                                System.out.printf("Public Tunnel Ping (%s): OFFLINE%n", statusAddr);
+                            }
+                        }
+                        return;
+
+                    case "export-starterpack":
+                        Path outZip = args.length > 1 ? Paths.get(args[1]) : rootDir.resolve("cohost-starterpack.zip");
+                        exportStarterPack(rootDir, outZip, System.out::println);
+                        return;
+
+                    case "import-starterpack":
+                        if (args.length < 2) {
+                            System.err.println("[ERROR] Usage: java -jar ServerLauncher.jar import-starterpack <path-to-zip> [target-folder]");
+                            return;
+                        }
+                        Path inZip = Paths.get(args[1]);
+                        Path targetF = args.length > 2 ? Paths.get(args[2]) : Paths.get(registry.getStorageRoot(), "imported-cluster");
+                        importStarterPack(inZip, targetF, registry, System.out::println);
                         return;
 
                     default:
-                        System.err.println("[ERROR] Unknown argument: " + cmd + " (Available: pull, push, publish-update, push-launcher, update, unlock, status, remote-stop, cancel-stop)");
+                        System.err.println("[ERROR] Unknown argument: " + cmd + " (Available: pull, push, publish-update, push-launcher, update, unlock, status, remote-stop, cancel-stop, export-starterpack, import-starterpack)");
                         return;
                 }
             }
@@ -207,6 +243,36 @@ public class ServerLauncher {
             if (!Files.exists(coreBinaryPath)) {
                 System.err.println("[ERROR] Server core missing! Expected at: " + coreBinaryPath);
                 System.err.println("Ensure your paper.jar is renamed to core.dat inside the 'bin' folder.");
+                return;
+            }
+
+            // Dual-Layer Tunnel Ping Guard: check if a server is actively running on the public address
+            String targetServerAddr = extractJsonString(configJson, "server_address");
+            if (targetServerAddr == null || targetServerAddr.isEmpty()) {
+                targetServerAddr = extractJsonString(configJson, "domain");
+                if (targetServerAddr != null && !targetServerAddr.isEmpty()) targetServerAddr += ".duckdns.org";
+            }
+            if (targetServerAddr != null && !targetServerAddr.isEmpty()) {
+                PingResult pr = pingMinecraftServer(targetServerAddr);
+                if (pr.isOnline) {
+                    System.out.println("\n========================================================");
+                    System.out.printf("[COLLISION GUARD] Active Minecraft session detected on tunnel '%s'!%n", targetServerAddr);
+                    System.out.printf("  Online Players: %d/%d | MOTD: %s%n", pr.onlinePlayers, pr.maxPlayers, pr.motd);
+                    System.out.println("  Launch aborted to prevent split-brain session conflict and data corruption.");
+                    System.out.println("  Please join the active session directly!");
+                    System.out.println("========================================================\n");
+                    return;
+                }
+            }
+
+            // Active Host Priority Gate: If a host is already live and newcomer has no world, prevent redundant downloads
+            if (hasB2 && isWorldEmpty(rootDir) && isCloudLocked(rootDir, rclone, b2Target, staleMin)) {
+                String lockHost = readLockHost(rootDir, rclone, b2Target);
+                System.out.println("\n========================================================");
+                System.out.printf("[ACTIVE HOST PRIORITY GATE] Cluster is actively hosted by '%s'!%n", lockHost);
+                System.out.println("Initial cloud sync is paused to guarantee live gameplay backup bandwidth.");
+                System.out.println("You can connect directly to the live session at: " + (duckDomain != null && !duckDomain.isEmpty() ? duckDomain + ".duckdns.org" : "jensen-edited.tun.ply.gg"));
+                System.out.println("========================================================\n");
                 return;
             }
 
@@ -328,6 +394,15 @@ public class ServerLauncher {
 
             // 6. Launch Server Process with Piped Console Forwarding
             System.out.printf("[5/6] Executing server runtime (%s heap allocation)...%n", javaMemory);
+            // Ensure Mojang EULA is accepted
+            Path eulaFile = rootDir.resolve("eula.txt");
+            try {
+                if (!Files.exists(eulaFile) || Files.readString(eulaFile).contains("eula=false")) {
+                    Files.writeString(eulaFile, "# Accepted automatically by Minecraft Cluster Orchestrator\neula=true\n");
+                    System.out.println("[EULA] Mojang EULA automatically accepted.");
+                }
+            } catch (Exception ignored) {}
+
             ProcessBuilder pb = new ProcessBuilder(
                     "java",
                     "-Dcluster.safe_launch=true",
@@ -495,22 +570,45 @@ public class ServerLauncher {
             return false;
         }
 
-        System.out.println("[B2 Sync] Pulling latest state from Backblaze B2...");
+        int cloudGen = readCloudGeneration(rootDir, rclone, b2Target);
+        int localGen = readLocalGeneration(rootDir);
+        boolean forceChecksum = (cloudGen > localGen);
+
+        System.out.printf("[B2 Sync] Pulling latest state from Backblaze B2 (Cloud Gen #%d vs Local Gen #%d)...%n", cloudGen, localGen);
         Path filterPath = rootDir.resolve("rclone-filter.txt");
-        String[] cmd;
+        List<String> cmd = new ArrayList<>();
+        cmd.add(rclone);
+        cmd.add("copy");
+        cmd.add(b2Target);
+        cmd.add(".");
         if (Files.exists(filterPath)) {
-            cmd = new String[]{rclone, "copy", b2Target, ".", "--filter-from", filterPath.toString(), "--fast-list"};
-        } else {
-            cmd = new String[]{rclone, "copy", b2Target + "/world", "world", "--fast-list"};
+            cmd.add("--filter-from");
+            cmd.add(filterPath.toString());
         }
-        CommandResult res = runCommand(rootDir, cmd);
+        cmd.add("--fast-list");
+        if (forceChecksum) {
+            // Anti-Timestamp Inversion: Ensure cloud chunks overwrite freshly extracted local files
+            cmd.add("--checksum");
+            System.out.println("[B2 Sync] Anti-Timestamp Inversion active (--checksum enforced).");
+        }
+
+        CommandResult res = runCommand(rootDir, cmd.toArray(new String[0]));
         if (res.exitCode == 0) {
-            int cloudGen = readCloudGeneration(rootDir, rclone, b2Target);
             writeLocalGeneration(rootDir, cloudGen);
             System.out.printf("[B2 Sync] Inbound synchronization complete (World Generation #%d).%n", cloudGen);
             return true;
         } else {
-            System.err.println("[WARN] Inbound sync returned code " + res.exitCode + ": " + res.stderr);
+            if (isQuotaExceeded(res)) {
+                System.err.println("\n========================================================");
+                System.err.println("[QUOTA GUARD] Backblaze B2 daily download quota exceeded (403 Cap).");
+                System.err.printf("  Free quota resets automatically at 00:00 UTC (in %s).%n", getTimeUntilUtcMidnightFormatted());
+                System.err.println("  Purging incomplete temporary download artifacts...");
+                purgeTemporaryFiles(rootDir);
+                System.err.println("  Tip: Admins can export a 'cohost-starterpack.zip' to onboard without cloud egress.");
+                System.err.println("========================================================\n");
+            } else {
+                System.err.println("[WARN] Inbound sync returned code " + res.exitCode + ": " + res.stderr);
+            }
             return false;
         }
     }
@@ -582,6 +680,17 @@ public class ServerLauncher {
             }
         }
         return false;
+    }
+
+    public static String readLockHost(Path rootDir, String rclone, String b2Target) {
+        CommandResult catRes = runCommand(rootDir, rclone, "cat", b2Target + "/cluster.lock");
+        if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
+            String activeHost = extractJsonString(catRes.stdout, "host");
+            if (activeHost != null && !activeHost.isEmpty()) {
+                return activeHost;
+            }
+        }
+        return "Active Peer";
     }
 
     public static boolean acquireCloudLock(Path rootDir, String rclone, String b2Target, String host, int staleMin) {
@@ -774,6 +883,9 @@ public class ServerLauncher {
         CommandResult res = runCommand(rootDir, cmd);
         if (res.exitCode == 0) {
             System.out.println("[Runtime Sync] Administrative distribution synchronized from B2.");
+        } else if (isQuotaExceeded(res)) {
+            System.err.println("[QUOTA GUARD] Admin distribution sync halted: Backblaze B2 daily download quota exceeded.");
+            purgeTemporaryFiles(rootDir);
         }
     }
 
@@ -938,6 +1050,107 @@ public class ServerLauncher {
         Files.writeString(path, json, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
     }
 
+    public static class PingResult {
+        public final boolean isOnline;
+        public final int onlinePlayers;
+        public final int maxPlayers;
+        public final String motd;
+        public final String version;
+
+        public PingResult(boolean isOnline, int onlinePlayers, int maxPlayers, String motd, String version) {
+            this.isOnline = isOnline;
+            this.onlinePlayers = onlinePlayers;
+            this.maxPlayers = maxPlayers;
+            this.motd = motd;
+            this.version = version;
+        }
+
+        public static PingResult offline() {
+            return new PingResult(false, 0, 0, "", "");
+        }
+    }
+
+    public static PingResult pingMinecraftServer(String fullAddress) {
+        if (fullAddress == null || fullAddress.isBlank()) return PingResult.offline();
+        String host = fullAddress.trim();
+        int port = 25565;
+        if (host.contains(":")) {
+            String[] parts = host.split(":");
+            host = parts[0].trim();
+            try {
+                port = Integer.parseInt(parts[1].trim());
+            } catch (Exception ignored) {}
+        }
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), 2500);
+            socket.setSoTimeout(2500);
+
+            OutputStream out = socket.getOutputStream();
+            InputStream in = socket.getInputStream();
+
+            // Handshake packet
+            ByteArrayOutputStream handshake = new ByteArrayOutputStream();
+            handshake.write(0x00); // packet id
+            handshake.write(0x00); // protocol version varint (0)
+            byte[] hostBytes = host.getBytes(StandardCharsets.UTF_8);
+            writeVarInt(handshake, hostBytes.length);
+            handshake.write(hostBytes);
+            handshake.write((port >> 8) & 0xFF);
+            handshake.write(port & 0xFF);
+            handshake.write(0x01); // next state: status
+
+            byte[] handshakeBytes = handshake.toByteArray();
+            writeVarInt(out, handshakeBytes.length);
+            out.write(handshakeBytes);
+
+            // Status request packet
+            out.write(0x01); // packet length
+            out.write(0x00); // packet id
+            out.flush();
+
+            // Read response
+            readVarInt(in); // packet length
+            readVarInt(in); // packet id
+            int jsonLength = readVarInt(in);
+
+            byte[] jsonBytes = in.readNBytes(jsonLength);
+            String json = new String(jsonBytes, StandardCharsets.UTF_8);
+
+            int online = extractJsonInt(json, "online", 0);
+            int max = extractJsonInt(json, "max", 20);
+            String motd = extractJsonString(json, "description");
+            String version = extractJsonString(json, "name");
+
+            return new PingResult(true, online, max, motd, version);
+        } catch (Exception e) {
+            return PingResult.offline();
+        }
+    }
+
+    private static void writeVarInt(OutputStream out, int value) throws IOException {
+        while ((value & 0xFFFFFF80) != 0) {
+            out.write((value & 0x7F) | 0x80);
+            value >>>= 7;
+        }
+        out.write(value & 0x7F);
+    }
+
+    private static int readVarInt(InputStream in) throws IOException {
+        int numRead = 0;
+        int result = 0;
+        int read;
+        do {
+            read = in.read();
+            if (read == -1) throw new EOFException();
+            int value = (read & 0x7F);
+            result |= (value << (7 * numRead));
+            numRead++;
+            if (numRead > 5) throw new RuntimeException("VarInt too big");
+        } while ((read & 0x80) != 0);
+        return result;
+    }
+
     public static String getTailscaleIp() {
         try {
             Process process = new ProcessBuilder("tailscale", "ip", "-4").start();
@@ -979,5 +1192,193 @@ public class ServerLauncher {
     public static long extractJsonLong(String json, String key, long def) {
         Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*([0-9]+)").matcher(json);
         return m.find() ? Long.parseLong(m.group(1)) : def;
+    }
+
+    public static boolean isQuotaExceeded(CommandResult res) {
+        if (res == null) return false;
+        String combined = ((res.stdout != null ? res.stdout : "") + " " + (res.stderr != null ? res.stderr : "")).toLowerCase();
+        return combined.contains("download_cap_exceeded")
+                || combined.contains("transaction_cap_exceeded")
+                || (combined.contains("403") && combined.contains("cap"));
+    }
+
+    public static void purgeTemporaryFiles(Path rootDir) {
+        try {
+            Files.walk(rootDir, 2)
+                    .filter(p -> p.toString().endsWith(".tmp") || p.getFileName().toString().startsWith(".rclone-tmp"))
+                    .forEach(p -> {
+                        try { Files.deleteIfExists(p); } catch (Exception ignored) {}
+                    });
+        } catch (Exception ignored) {}
+    }
+
+    public static String getTimeUntilUtcMidnightFormatted() {
+        ZonedDateTime nowUtc = ZonedDateTime.now(ZoneOffset.UTC);
+        ZonedDateTime midnightUtc = nowUtc.toLocalDate().plusDays(1).atStartOfDay(ZoneOffset.UTC);
+        Duration diff = Duration.between(nowUtc, midnightUtc);
+        long hours = diff.toHours();
+        long minutes = diff.toMinutesPart();
+        return String.format("%d hours, %d minutes", hours, minutes);
+    }
+
+    public static boolean isWorldEmpty(Path rootDir) {
+        Path worldDir = rootDir.resolve("world");
+        if (!Files.exists(worldDir)) return true;
+        Path regionDir = worldDir.resolve("region");
+        if (!Files.exists(regionDir)) return true;
+        try (var stream = Files.list(regionDir)) {
+            return stream.noneMatch(p -> p.getFileName().toString().endsWith(".mca"));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public static void exportStarterPack(Path rootDir, Path destZipPath, java.util.function.Consumer<String> logger) throws IOException {
+        if (logger == null) logger = System.out::println;
+        logger.accept("[Starter Pack] Initializing export from " + rootDir + "...");
+
+        // Ensure eula.txt is set to eula=true
+        Path eulaFile = rootDir.resolve("eula.txt");
+        if (!Files.exists(eulaFile) || Files.readString(eulaFile).contains("eula=false")) {
+            Files.writeString(eulaFile, "# Accepted automatically by Minecraft Cluster Orchestrator\neula=true\n");
+        }
+
+        if (destZipPath.getParent() != null && !Files.exists(destZipPath.getParent())) {
+            Files.createDirectories(destZipPath.getParent());
+        }
+
+        try (ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(Files.newOutputStream(destZipPath)))) {
+            zos.setLevel(Deflater.DEFAULT_COMPRESSION);
+
+            // 1. Export world/ directory
+            Path worldDir = rootDir.resolve("world");
+            if (Files.exists(worldDir)) {
+                logger.accept("[Starter Pack] Packaging world save data...");
+                addDirectoryToZip(worldDir, "world", zos, logger);
+            }
+
+            // 2. Export plugins/ directory
+            Path pluginsDir = rootDir.resolve("plugins");
+            if (Files.exists(pluginsDir)) {
+                logger.accept("[Starter Pack] Packaging plugins and configurations...");
+                addDirectoryToZip(pluginsDir, "plugins", zos, logger);
+            }
+
+            // 3. Export bin/core.dat
+            Path coreDat = rootDir.resolve("bin").resolve("core.dat");
+            if (Files.exists(coreDat)) {
+                logger.accept("[Starter Pack] Packaging core.dat (Paper server runtime)...");
+                addFileToZip(coreDat, "bin/core.dat", zos);
+            }
+
+            // 4. Export configuration and server properties
+            String[] configFiles = {
+                    "config.json", "server.properties", "server-icon.png", "spigot.yml",
+                    "bukkit.yml", "commands.yml", "ops.json", "whitelist.json", "banned-players.json",
+                    "banned-ips.json", "eula.txt", "LAUNCH_ORCHESTRATOR.bat", "START_SERVER.bat",
+                    "rclone-filter.txt", "admin-dist-filter.txt"
+            };
+
+            for (String fName : configFiles) {
+                Path f = rootDir.resolve(fName);
+                if (Files.exists(f)) {
+                    addFileToZip(f, fName, zos);
+                }
+            }
+
+            logger.accept("[Starter Pack] Archive packaging complete: " + destZipPath.getFileName());
+        }
+    }
+
+    private static void addFileToZip(Path file, String entryName, ZipOutputStream zos) throws IOException {
+        ZipEntry entry = new ZipEntry(entryName.replace('\\', '/'));
+        entry.setTime(Files.getLastModifiedTime(file).toMillis());
+        zos.putNextEntry(entry);
+        Files.copy(file, zos);
+        zos.closeEntry();
+    }
+
+    private static void addDirectoryToZip(Path dir, String baseEntryName, ZipOutputStream zos, java.util.function.Consumer<String> logger) throws IOException {
+        try (var walk = Files.walk(dir)) {
+            walk.forEach(path -> {
+                try {
+                    if (Files.isDirectory(path)) return;
+                    String rel = dir.relativize(path).toString().replace('\\', '/');
+                    String entryName = baseEntryName + "/" + rel;
+
+                    // Skip temp and log files
+                    if (entryName.endsWith(".tmp") || entryName.endsWith(".log") || entryName.contains(".rclone-tmp")) {
+                        return;
+                    }
+
+                    addFileToZip(path, entryName, zos);
+                } catch (Exception e) {
+                    if (logger != null) logger.accept("[WARN] Could not package " + path + ": " + e.getMessage());
+                }
+            });
+        }
+    }
+
+    public static String importStarterPack(Path zipPath, Path targetDir, ClusterRegistry registry, java.util.function.Consumer<String> logger) throws IOException {
+        if (logger == null) logger = System.out::println;
+        logger.accept("[Starter Pack] Unpacking starter pack from " + zipPath + "...");
+
+        if (!Files.exists(targetDir)) {
+            Files.createDirectories(targetDir);
+        }
+
+        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(zipPath)))) {
+            ZipEntry entry;
+            byte[] buf = new byte[8192];
+            while ((entry = zis.getNextEntry()) != null) {
+                Path outPath = targetDir.resolve(entry.getName());
+                if (entry.isDirectory()) {
+                    Files.createDirectories(outPath);
+                } else {
+                    if (outPath.getParent() != null) {
+                        Files.createDirectories(outPath.getParent());
+                    }
+                    try (OutputStream os = Files.newOutputStream(outPath)) {
+                        int read;
+                        while ((read = zis.read(buf)) != -1) {
+                            os.write(buf, 0, read);
+                        }
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+
+        // Ensure eula.txt is eula=true
+        Path eulaFile = targetDir.resolve("eula.txt");
+        Files.writeString(eulaFile, "# Accepted automatically by Minecraft Cluster Orchestrator\neula=true\n");
+
+        // Read config.json to identify cluster details
+        Path cfgFile = targetDir.resolve("config.json");
+        String clusterId = "cluster-" + System.currentTimeMillis();
+        String clusterName = "Imported Cluster";
+        String bucket = "";
+        String domain = "";
+
+        if (Files.exists(cfgFile)) {
+            String json = Files.readString(cfgFile);
+            bucket = extractJsonString(json, "b2_bucket");
+            domain = extractJsonString(json, "domain");
+            if (!bucket.isEmpty()) {
+                clusterId = bucket.toLowerCase().replaceAll("[^a-z0-9_-]", "-");
+                clusterName = bucket.replace("-", " ");
+            }
+        }
+
+        if (registry != null) {
+            ClusterRegistry.ClusterProfile profile = new ClusterRegistry.ClusterProfile(
+                    clusterId, clusterName, targetDir.toAbsolutePath().toString(), bucket, domain
+            );
+            registry.registerCluster(profile);
+            registry.setActiveClusterId(profile.id);
+            logger.accept("[Starter Pack] Registered new cluster profile: " + clusterName + " (" + clusterId + ")");
+        }
+
+        return clusterId;
     }
 }

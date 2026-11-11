@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# ========================================================
+# Minecraft Cluster Orchestrator - Native Linux Launcher
+# ========================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# 1. Apply pending orchestrator update if present
+if [ -f "ServerLauncher.jar.update" ]; then
+    mv -f "ServerLauncher.jar.update" "ServerLauncher.jar"
+fi
+
+# 2. Check for ServerLauncher.jar
+if [ ! -f "ServerLauncher.jar" ]; then
+    echo "[ERROR] ServerLauncher.jar not found in $SCRIPT_DIR"
+    exit 1
+fi
+
+# 3. If arguments provided, run in foreground console
+if [ "$#" -gt 0 ]; then
+    exec java -jar ServerLauncher.jar "$@"
+fi
+
+# 4. GUI Mode: Launch cleanly detached
+if command -v javaw >/dev/null 2>&1; then
+    nohup javaw -jar ServerLauncher.jar >/dev/null 2>&1 &
+else
+    nohup java -jar ServerLauncher.jar >/dev/null 2>&1 &
+fi
+exit 0

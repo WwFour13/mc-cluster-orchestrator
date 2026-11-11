@@ -23,7 +23,10 @@ public class ClusterGUI extends JFrame {
     public static final Color COLOR_ROSE = new Color(239, 68, 68);         // Crimson #ef4444
     public static final Color COLOR_AMBER = new Color(245, 158, 11);       // Amber #f59e0b
 
-    private final Path rootDir;
+    private Path rootDir;
+    private final ClusterRegistry clusterRegistry;
+    private JComboBox<ClusterRegistry.ClusterProfile> clusterSelector;
+    private java.awt.event.ActionListener clusterSelectorListener;
 
     // View Switching
     private final CardLayout masterLayout = new CardLayout();
@@ -83,7 +86,13 @@ public class ClusterGUI extends JFrame {
     private final ExecutorService workerPool = Executors.newCachedThreadPool();
 
     public ClusterGUI(Path rootDir) {
-        this.rootDir = rootDir;
+        this.clusterRegistry = ClusterRegistry.getInstance(rootDir);
+        ClusterRegistry.ClusterProfile active = clusterRegistry.getActiveCluster();
+        if (active != null && !active.path.isEmpty() && Files.exists(Paths.get(active.path))) {
+            this.rootDir = Paths.get(active.path);
+        } else {
+            this.rootDir = rootDir;
+        }
         setTitle("Minecraft Cluster Orchestrator [v" + ServerLauncher.APP_VERSION + "]");
         setSize(1020, 750);
         setMinimumSize(new Dimension(880, 640));
@@ -222,16 +231,37 @@ public class ClusterGUI extends JFrame {
         JPanel subHeader = new JPanel(new BorderLayout(10, 0));
         subHeader.setOpaque(false);
 
-        JPanel hostInfo = new JPanel(new GridLayout(2, 1, 0, 2));
+        JPanel hostInfo = new JPanel(new GridLayout(2, 1, 0, 4));
         hostInfo.setOpaque(false);
-        JLabel clusterTitle = new JLabel("Dorm Craft SMP — Shared Cluster");
-        clusterTitle.setFont(new Font("Segoe UI", Font.BOLD, 19));
-        clusterTitle.setForeground(COLOR_TEXT_PRIMARY);
+
+        JPanel clusterRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        clusterRow.setOpaque(false);
+
+        JLabel iconLbl = new JLabel("🎮");
+        iconLbl.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 16));
+
+        clusterSelector = new JComboBox<>();
+        clusterSelector.setFont(new Font("Segoe UI", Font.BOLD, 14));
+        clusterSelector.setPreferredSize(new Dimension(280, 32));
+        styleDarkComboBox(clusterSelector);
+
+        clusterSelectorListener = e -> onClusterSelected();
+        refreshClusterSelectorItems();
+
+        ModernButton addClusterBtn = new ModernButton("➕", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 4);
+        addClusterBtn.setToolTipText("Import or Create New Cluster Profile");
+        addClusterBtn.setPreferredSize(new Dimension(36, 32));
+        addClusterBtn.addActionListener(e -> showImportClusterDialog());
+
+        clusterRow.add(iconLbl);
+        clusterRow.add(clusterSelector);
+        clusterRow.add(addClusterBtn);
 
         hostSubtitle = new JLabel("Host: " + ServerLauncher.getHostName() + " | Local Storage: " + rootDir.toString());
         hostSubtitle.setFont(new Font("Segoe UI", Font.PLAIN, 12));
         hostSubtitle.setForeground(COLOR_TEXT_MUTED);
-        hostInfo.add(clusterTitle);
+
+        hostInfo.add(clusterRow);
         hostInfo.add(hostSubtitle);
 
         JPanel radarBlock = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
@@ -309,7 +339,7 @@ public class ClusterGUI extends JFrame {
 
         JPanel copyIpRow = new JPanel(new BorderLayout(6, 0));
         copyIpRow.setOpaque(false);
-        ipAddressField = createDarkTextField(resolveDynamicServerAddress());
+        ipAddressField = createDarkTextFieldWithText(resolveDynamicServerAddress());
         ipAddressField.setEditable(false);
         copyIpBtn = new ModernButton("COPY IP", COLOR_BLUE, Color.WHITE, 11, 6);
         copyIpBtn.setPreferredSize(new Dimension(85, 28));
@@ -523,7 +553,7 @@ public class ClusterGUI extends JFrame {
         keyRow.setPreferredSize(new Dimension(0, 34));
         keyRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 34));
 
-        adminInviteKeyField = createDarkTextField("mc-cluster://...");
+        adminInviteKeyField = createDarkTextFieldWithText("mc-cluster://...");
         adminInviteKeyField.setFont(new Font("Consolas", Font.PLAIN, 12));
         adminInviteKeyField.setEditable(false);
         adminInviteKeyField.setPreferredSize(new Dimension(0, 34));
@@ -557,6 +587,38 @@ public class ClusterGUI extends JFrame {
         inviteCard.add(inviteTitle, BorderLayout.NORTH);
         inviteCard.add(keyRow, BorderLayout.CENTER);
         inviteCard.add(shareNote, BorderLayout.SOUTH);
+
+        // Section 1.5: Zero-Bandwidth Cohost Starter Pack (Export & Import)
+        ModernCard starterPackCard = new ModernCard();
+        starterPackCard.setLayout(new BorderLayout(10, 8));
+        starterPackCard.setBorder(new EmptyBorder(14, 18, 14, 18));
+        starterPackCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 125));
+
+        JLabel starterTitle = new JLabel("COHOST STARTER PACK (ZERO CLOUD EGRESS)");
+        starterTitle.setFont(new Font("Segoe UI", Font.BOLD, 13));
+        starterTitle.setForeground(COLOR_EMERALD);
+
+        JLabel starterDesc = new JLabel("Package world, plugins, configs, and runtime into cohost-starterpack.zip to invite co-hosts without using Backblaze download quota.");
+        starterDesc.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        starterDesc.setForeground(COLOR_TEXT_MUTED);
+
+        JPanel starterActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        starterActions.setOpaque(false);
+
+        ModernButton exportZipBtn = new ModernButton("📦 EXPORT STARTER PACK (.zip)", COLOR_EMERALD, Color.WHITE, 12, 8);
+        exportZipBtn.setPreferredSize(new Dimension(240, 36));
+        exportZipBtn.addActionListener(e -> exportStarterPackAction());
+
+        ModernButton importZipBtn = new ModernButton("📁 IMPORT STARTER PACK (.zip)", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 8);
+        importZipBtn.setPreferredSize(new Dimension(240, 36));
+        importZipBtn.addActionListener(e -> showImportClusterDialog());
+
+        starterActions.add(exportZipBtn);
+        starterActions.add(importZipBtn);
+
+        starterPackCard.add(starterTitle, BorderLayout.NORTH);
+        starterPackCard.add(starterDesc, BorderLayout.CENTER);
+        starterPackCard.add(starterActions, BorderLayout.SOUTH);
 
         // Section 2: Operational Controls (Remote Stop, Force Unlock, & Cloud Config Sync)
         ModernCard opsCard = new ModernCard();
@@ -666,6 +728,8 @@ public class ClusterGUI extends JFrame {
 
         body.add(inviteCard);
         body.add(Box.createVerticalStrut(14));
+        body.add(starterPackCard);
+        body.add(Box.createVerticalStrut(14));
         body.add(opsCard);
         body.add(Box.createVerticalStrut(14));
         body.add(stateCard);
@@ -740,14 +804,21 @@ public class ClusterGUI extends JFrame {
         header.add(sub);
 
         ModernCard formCard = new ModernCard();
-        formCard.setLayout(new GridLayout(6, 1, 0, 10));
-        formCard.setBorder(new EmptyBorder(16, 20, 16, 20));
+        formCard.setLayout(new BoxLayout(formCard, BoxLayout.Y_AXIS));
+        formCard.setBorder(new EmptyBorder(20, 24, 20, 24));
 
         // Row 1: Storage directory
-        JPanel pathRow = new JPanel(new BorderLayout(8, 0));
+        JPanel pathRow = new JPanel(new BorderLayout(10, 0));
         pathRow.setOpaque(false);
-        settingsStorageField = createDarkTextField(rootDir.toString());
+        pathRow.setPreferredSize(new Dimension(0, 36));
+        pathRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
+
+        settingsStorageField = createDarkTextFieldWithText(rootDir.toString());
+        settingsStorageField.setPreferredSize(new Dimension(0, 36));
+        settingsStorageField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
+
         ModernButton browseBtn = new ModernButton("Browse...", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
+        browseBtn.setPreferredSize(new Dimension(90, 36));
         browseBtn.addActionListener(e -> {
             JFileChooser chooser = new JFileChooser(rootDir.toFile());
             chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
@@ -755,43 +826,64 @@ public class ClusterGUI extends JFrame {
                 settingsStorageField.setText(chooser.getSelectedFile().getAbsolutePath());
             }
         });
-        pathRow.add(new JLabel("Storage Directory: ") {{ setForeground(COLOR_TEXT_MUTED); }}, BorderLayout.WEST);
+
+        JLabel pathLbl = new JLabel("Storage Directory:");
+        pathLbl.setPreferredSize(new Dimension(180, 36));
+        pathLbl.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        pathLbl.setForeground(COLOR_TEXT_MUTED);
+
+        pathRow.add(pathLbl, BorderLayout.WEST);
         pathRow.add(settingsStorageField, BorderLayout.CENTER);
         pathRow.add(browseBtn, BorderLayout.EAST);
 
         // Row 2: Bucket Name
-        settingsBucketField = createDarkTextField("b2_bucket");
+        settingsBucketField = createDarkTextField("e.g. my-minecraft-cluster");
         // Row 3: Key ID
-        settingsKeyIdField = createDarkTextField("b2_key_id");
+        settingsKeyIdField = createDarkTextField("e.g. 0046c0c9ef987000000000001");
         // Row 4: Application Key
-        settingsAppKeyField = createDarkTextField("b2_application_key");
+        settingsAppKeyField = createDarkTextField("e.g. K004XKwcFTHgMQFL64OGZixY0MniwLI");
         // Row 5: Bandwidth Cap
-        settingsBwLimitField = createDarkTextField("10M");
+        settingsBwLimitField = createDarkTextField("e.g. 10M (optional)");
 
         // Row 6: Heartbeat and Autosave spinners
-        JPanel timingRow = new JPanel(new GridLayout(1, 2, 15, 0));
+        JPanel timingRow = new JPanel(new GridLayout(1, 2, 20, 0));
         timingRow.setOpaque(false);
+        timingRow.setPreferredSize(new Dimension(0, 36));
+        timingRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
 
-        JPanel hbBlock = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        JPanel hbBlock = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
         hbBlock.setOpaque(false);
-        hbBlock.add(new JLabel("Heartbeat Interval (sec):") {{ setForeground(COLOR_TEXT_MUTED); }});
+        JLabel hbLbl = new JLabel("Heartbeat Interval (sec):");
+        hbLbl.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        hbLbl.setForeground(COLOR_TEXT_MUTED);
+        hbBlock.add(hbLbl);
         settingsHeartbeatSpinner = new JSpinner(new SpinnerNumberModel(120, 30, 600, 10));
+        styleDarkSpinner(settingsHeartbeatSpinner, 85, 32);
         hbBlock.add(settingsHeartbeatSpinner);
 
-        JPanel asBlock = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        JPanel asBlock = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
         asBlock.setOpaque(false);
-        asBlock.add(new JLabel("Autosave Snapshot (min):") {{ setForeground(COLOR_TEXT_MUTED); }});
+        JLabel asLbl = new JLabel("Autosave Snapshot (min):");
+        asLbl.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        asLbl.setForeground(COLOR_TEXT_MUTED);
+        asBlock.add(asLbl);
         settingsAutosaveSpinner = new JSpinner(new SpinnerNumberModel(15, 5, 120, 5));
+        styleDarkSpinner(settingsAutosaveSpinner, 85, 32);
         asBlock.add(settingsAutosaveSpinner);
 
         timingRow.add(hbBlock);
         timingRow.add(asBlock);
 
         formCard.add(pathRow);
+        formCard.add(Box.createVerticalStrut(12));
         formCard.add(createLabeledRow("Backblaze Bucket:", settingsBucketField));
+        formCard.add(Box.createVerticalStrut(12));
         formCard.add(createLabeledRow("Application Key ID:", settingsKeyIdField));
+        formCard.add(Box.createVerticalStrut(12));
         formCard.add(createLabeledRow("Application Key Secret:", settingsAppKeyField));
+        formCard.add(Box.createVerticalStrut(12));
         formCard.add(createLabeledRow("Upload Bandwidth Limit:", settingsBwLimitField));
+        formCard.add(Box.createVerticalStrut(12));
         formCard.add(timingRow);
 
         // Populate initial values
@@ -807,18 +899,30 @@ public class ClusterGUI extends JFrame {
 
         footer.add(saveBtn);
 
+        JPanel contentWrap = new JPanel(new BorderLayout());
+        contentWrap.setOpaque(false);
+        contentWrap.add(formCard, BorderLayout.NORTH);
+
         panel.add(header, BorderLayout.NORTH);
-        panel.add(formCard, BorderLayout.CENTER);
+        panel.add(contentWrap, BorderLayout.CENTER);
         panel.add(footer, BorderLayout.SOUTH);
         return panel;
     }
 
     private JPanel createLabeledRow(String label, JComponent comp) {
-        JPanel p = new JPanel(new BorderLayout(8, 0));
+        JPanel p = new JPanel(new BorderLayout(10, 0));
         p.setOpaque(false);
+        p.setPreferredSize(new Dimension(0, 36));
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
+
         JLabel l = new JLabel(label);
-        l.setPreferredSize(new Dimension(170, 28));
+        l.setPreferredSize(new Dimension(180, 36));
+        l.setFont(new Font("Segoe UI", Font.BOLD, 12));
         l.setForeground(COLOR_TEXT_MUTED);
+
+        comp.setPreferredSize(new Dimension(0, 36));
+        comp.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
+
         p.add(l, BorderLayout.WEST);
         p.add(comp, BorderLayout.CENTER);
         return p;
@@ -829,10 +933,16 @@ public class ClusterGUI extends JFrame {
             Path cfg = rootDir.resolve("config.json");
             if (!Files.exists(cfg)) return;
             String json = Files.readString(cfg);
-            settingsBucketField.setText(ServerLauncher.extractJsonString(json, "b2_bucket"));
-            settingsKeyIdField.setText(ServerLauncher.extractJsonString(json, "b2_key_id"));
-            settingsAppKeyField.setText(ServerLauncher.extractJsonString(json, "b2_application_key"));
-            settingsBwLimitField.setText(ServerLauncher.extractJsonString(json, "b2_bandwidth_limit"));
+            String bucket = ServerLauncher.extractJsonString(json, "b2_bucket");
+            String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
+            String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
+            String bw = ServerLauncher.extractJsonString(json, "b2_bandwidth_limit");
+
+            settingsBucketField.setText(bucket != null ? bucket : "");
+            settingsKeyIdField.setText(keyId != null ? keyId : "");
+            settingsAppKeyField.setText(appKey != null ? appKey : "");
+            settingsBwLimitField.setText(bw != null ? bw : "");
+
             settingsHeartbeatSpinner.setValue(ServerLauncher.extractJsonInt(json, "heartbeat_seconds", 120));
             settingsAutosaveSpinner.setValue(ServerLauncher.extractJsonInt(json, "save_interval_minutes", 15));
         } catch (Exception ignored) {}
@@ -886,7 +996,7 @@ public class ClusterGUI extends JFrame {
         header.add(title);
         header.add(sub);
 
-        JPanel choiceRow = new JPanel(new GridLayout(1, 2, 28, 0));
+        JPanel choiceRow = new JPanel(new GridLayout(1, 3, 20, 0));
         choiceRow.setOpaque(false);
         choiceRow.setBorder(new EmptyBorder(20, 20, 30, 20));
 
@@ -940,8 +1050,39 @@ public class ClusterGUI extends JFrame {
         joinCard.add(joinText, BorderLayout.CENTER);
         joinCard.add(joinAction, BorderLayout.SOUTH);
 
+        // Card C: Import Starter Pack (Zero Egress)
+        ModernCard starterCard = new ModernCard();
+        starterCard.setLayout(new BorderLayout(0, 14));
+        starterCard.setBorder(new EmptyBorder(26, 24, 26, 24));
+
+        JLabel starterIconTitle = new JLabel("📦 STARTER PACK", SwingConstants.CENTER);
+        starterIconTitle.setFont(new Font("Segoe UI", Font.BOLD, 17));
+        starterIconTitle.setForeground(COLOR_AMBER);
+
+        JTextArea starterText = new JTextArea("Received a cohost-starterpack.zip from your admin? Import it directly to set up world saves, plugins, and configs in seconds with zero Backblaze download bandwidth.");
+        starterText.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        starterText.setForeground(COLOR_TEXT_MUTED);
+        starterText.setLineWrap(true);
+        starterText.setWrapStyleWord(true);
+        starterText.setOpaque(false);
+        starterText.setEditable(false);
+
+        ModernButton starterAction = new ModernButton("Import Starter Pack (.zip)", COLOR_AMBER, Color.WHITE, 13, 8);
+        starterAction.setPreferredSize(new Dimension(200, 44));
+        starterAction.addActionListener(e -> {
+            showImportClusterDialog();
+            if (isConfigured()) {
+                masterLayout.show(masterContainer, "VIEW_MAIN_APP");
+            }
+        });
+
+        starterCard.add(starterIconTitle, BorderLayout.NORTH);
+        starterCard.add(starterText, BorderLayout.CENTER);
+        starterCard.add(starterAction, BorderLayout.SOUTH);
+
         choiceRow.add(createCard);
         choiceRow.add(joinCard);
+        choiceRow.add(starterCard);
 
         choiceScreen.add(header, BorderLayout.NORTH);
         choiceScreen.add(choiceRow, BorderLayout.CENTER);
@@ -985,8 +1126,7 @@ public class ClusterGUI extends JFrame {
         freshRadio.setOpaque(false);
 
         JComboBox<String> versionCombo = new JComboBox<>(PaperDownloader.SUPPORTED_VERSIONS);
-        versionCombo.setBackground(COLOR_BG_CARD);
-        versionCombo.setForeground(COLOR_TEXT_PRIMARY);
+        styleDarkComboBox(versionCombo);
 
         JRadioButton adoptRadio = new JRadioButton("📁  ADOPT AN EXISTING SERVER (Convert local world, Paper server, and plugins)");
         adoptRadio.setForeground(COLOR_TEXT_PRIMARY);
@@ -1032,7 +1172,7 @@ public class ClusterGUI extends JFrame {
         JTextField bucketField = createDarkTextField("Backblaze B2 Bucket Name (e.g. my-minecraft-cluster)");
         JTextField keyIdField = createDarkTextField("B2 Application Key ID");
         JTextField appKeyField = createDarkTextField("B2 Application Key Secret");
-        JTextField hostField = createDarkTextField("Admin-" + ServerLauncher.getHostName());
+        JTextField hostField = createDarkTextFieldWithText("Admin-" + ServerLauncher.getHostName());
 
         b2Card.add(b2Title);
         b2Card.add(bucketField);
@@ -1130,7 +1270,7 @@ public class ClusterGUI extends JFrame {
         // Storage path picker
         JPanel pathRow = new JPanel(new BorderLayout(8, 0));
         pathRow.setOpaque(false);
-        JTextField pathField = createDarkTextField(rootDir.toString());
+        JTextField pathField = createDarkTextFieldWithText(rootDir.toString());
         ModernButton browseBtn = new ModernButton("Browse...", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
         browseBtn.addActionListener(e -> {
             JFileChooser chooser = new JFileChooser(rootDir.toFile());
@@ -1149,7 +1289,7 @@ public class ClusterGUI extends JFrame {
         JTextField bucketField = createDarkTextField("B2 Bucket Name");
         JTextField keyIdField = createDarkTextField("B2 Application Key ID");
         JTextField appKeyField = createDarkTextField("B2 Application Key Secret");
-        JTextField hostField = createDarkTextField(ServerLauncher.getHostName());
+        JTextField hostField = createDarkTextFieldWithText(ServerLauncher.getHostName());
 
         tokenField.addKeyListener(new KeyAdapter() {
             @Override
@@ -1238,6 +1378,7 @@ public class ClusterGUI extends JFrame {
     private void launchServerSession() {
         if (isServerRunning) return;
         isServerRunning = true;
+        if (clusterSelector != null) clusterSelector.setEnabled(false);
 
         primaryActionBtn.setText("IGNITING ENGINE...");
         primaryActionBtn.setBackgroundColor(COLOR_AMBER);
@@ -1289,6 +1430,30 @@ public class ClusterGUI extends JFrame {
                     return;
                 }
 
+                // Active Host Priority Gate: If a host is already live and newcomer has no local world, prevent redundant downloads
+                if (ServerLauncher.isWorldEmpty(rootDir) && ServerLauncher.isCloudLocked(rootDir, rclone, b2Target, staleMin)) {
+                    String lockHost = ServerLauncher.readLockHost(rootDir, rclone, b2Target);
+                    appendConsoleLog("[Active Host Priority Gate] Cluster is actively hosted by '" + lockHost + "'!");
+                    abortLaunch("ACTIVE HOST PRIORITY GATE\n\n" +
+                            "This cluster is actively hosted live by: " + lockHost + "\n\n" +
+                            "Initial cloud downloads are paused to guarantee live gameplay backup bandwidth.\n" +
+                            "Please connect directly to the active session at:\n" +
+                            (duckDomain != null && !duckDomain.isEmpty() ? duckDomain + ".duckdns.org" : "jensen-edited.tun.ply.gg"));
+                    return;
+                }
+
+                // Dual-Layer Tunnel Ping Guard: Prevent collisions if a peer is already live on the tunnel
+                String sAddr = resolveDynamicServerAddress();
+                ServerLauncher.PingResult pingRes = ServerLauncher.pingMinecraftServer(sAddr);
+                if (pingRes.isOnline) {
+                    appendConsoleLog(String.format("[COLLISION GUARD] Active Minecraft session detected on tunnel '%s' (%d players online)!", sAddr, pingRes.onlinePlayers));
+                    abortLaunch(String.format("ACTIVE MINECRAFT SESSION DETECTED ON TUNNEL!\n\n" +
+                            "Endpoint: %s\nPlayers Online: %d/%d\nMOTD: %s\n\n" +
+                            "Launch blocked to prevent session conflict and world corruption.\n" +
+                            "Please connect directly to the active server!", sAddr, pingRes.onlinePlayers, pingRes.maxPlayers, pingRes.motd));
+                    return;
+                }
+
                 // Milestone 2: Cloud Lock
                 updateMilestoneStep(1, "2. Cloud Lock...", COLOR_AMBER, 35);
                 appendConsoleLog("[Step 2/5] Acquiring cluster cloud lock...");
@@ -1305,7 +1470,18 @@ public class ClusterGUI extends JFrame {
                 updateMilestoneStep(2, "3. Syncing Cloud...", COLOR_AMBER, 55);
                 appendConsoleLog("[Step 3/5] Pulling latest world generation & master runtime assets...");
                 ServerLauncher.syncAdminDistribution(rootDir, rclone, b2Target);
-                ServerLauncher.pullFromB2(rootDir, rclone, b2Target, staleMin, true);
+                boolean syncOk = ServerLauncher.pullFromB2(rootDir, rclone, b2Target, staleMin, true);
+                if (!syncOk) {
+                    appendConsoleLog("[WARN] World sync did not complete cleanly.");
+                    if (ServerLauncher.isWorldEmpty(rootDir)) {
+                        String countdown = ServerLauncher.getTimeUntilUtcMidnightFormatted();
+                        abortLaunch("Backblaze B2 Daily Download Cap Exceeded (403 Cap)\n\n" +
+                                "The free tier daily bandwidth limit has been reached.\n" +
+                                "Quota resets automatically at 00:00 UTC (in " + countdown + ").\n\n" +
+                                "Workaround: Ask the server admin for a 'cohost-starterpack.zip' to onboard without cloud egress.");
+                        return;
+                    }
+                }
                 updateMilestoneStep(2, "3. Synchronized", COLOR_EMERALD, 65);
 
                 // Playit Sidecar Daemon
@@ -1366,6 +1542,15 @@ public class ClusterGUI extends JFrame {
                     abortLaunch("Server binary missing: bin/core.dat");
                     return;
                 }
+
+                // Ensure Mojang EULA is accepted
+                Path eulaFile = rootDir.resolve("eula.txt");
+                try {
+                    if (!Files.exists(eulaFile) || Files.readString(eulaFile).contains("eula=false")) {
+                        Files.writeString(eulaFile, "# Accepted automatically by Minecraft Cluster Orchestrator\neula=true\n");
+                        appendConsoleLog("[EULA] Mojang EULA automatically accepted.");
+                    }
+                } catch (Exception ignored) {}
 
                 ProcessBuilder mcPb = new ProcessBuilder(
                         "java",
@@ -1445,6 +1630,7 @@ public class ClusterGUI extends JFrame {
 
         isServerRunning = false;
         SwingUtilities.invokeLater(() -> {
+            if (clusterSelector != null) clusterSelector.setEnabled(true);
             primaryActionBtn.setText("▶  START CLUSTER SERVER");
             primaryActionBtn.setBackgroundColor(COLOR_EMERALD);
             primaryActionBtn.setEnabled(true);
@@ -1457,6 +1643,7 @@ public class ClusterGUI extends JFrame {
     private void abortLaunch(String reason) {
         isServerRunning = false;
         SwingUtilities.invokeLater(() -> {
+            if (clusterSelector != null) clusterSelector.setEnabled(true);
             primaryActionBtn.setText("▶  START CLUSTER SERVER");
             primaryActionBtn.setBackgroundColor(COLOR_EMERALD);
             primaryActionBtn.setEnabled(true);
@@ -1473,6 +1660,20 @@ public class ClusterGUI extends JFrame {
 
         if (!isServerRunning || activeMcStdin == null) {
             appendConsoleLog("[LOCAL] Server offline. Ignored command: " + cmd);
+            return;
+        }
+
+        String lower = cmd.toLowerCase().trim();
+        if (lower.equals("stop")) {
+            appendConsoleLog("[GUI] Intercepted 'stop' command. Initiating safe cluster teardown & cloud push...");
+            terminateServerSession();
+            return;
+        }
+
+        if (lower.equals("restart") || lower.equals("reset") || lower.equals("reload")) {
+            appendConsoleLog("[CLUSTER GUARD] Command '" + cmd + "' intercepted!");
+            appendConsoleLog("[CLUSTER GUARD] In a distributed cluster, uncoordinated in-engine restarts are blocked.");
+            appendConsoleLog("[CLUSTER GUARD] Use '■ SAFE SHUTDOWN & CLOUD PUSH' to conclude the session cleanly.");
             return;
         }
 
@@ -1526,8 +1727,16 @@ public class ClusterGUI extends JFrame {
                         statusBadge.setText("● Active on " + (activeHost != null ? activeHost : "Remote Host"));
                         statusBadge.setForeground(COLOR_AMBER);
                     } else {
-                        statusBadge.setText("● Cluster Available");
-                        statusBadge.setForeground(COLOR_EMERALD);
+                        // Dual-Layer Tunnel Ping Guard: Probe the live server address directly
+                        String sAddr = resolveDynamicServerAddress();
+                        ServerLauncher.PingResult pr = ServerLauncher.pingMinecraftServer(sAddr);
+                        if (pr.isOnline) {
+                            statusBadge.setText(String.format("● Live on Tunnel (%d Online)", pr.onlinePlayers));
+                            statusBadge.setForeground(COLOR_AMBER);
+                        } else {
+                            statusBadge.setText("● Cluster Available");
+                            statusBadge.setForeground(COLOR_EMERALD);
+                        }
                     }
                 });
             } catch (Exception e) {
@@ -1815,17 +2024,258 @@ public class ClusterGUI extends JFrame {
         } catch (Exception ignored) {}
     }
 
-    private JTextField createDarkTextField(String placeholder) {
-        JTextField tf = new JTextField(placeholder);
-        tf.setBackground(COLOR_BG_INPUT);
-        tf.setForeground(COLOR_TEXT_PRIMARY);
-        tf.setCaretColor(COLOR_TEXT_PRIMARY);
-        tf.setFont(new Font("Segoe UI", Font.PLAIN, 12));
-        tf.setBorder(BorderFactory.createCompoundBorder(
+    private PlaceholderTextField createDarkTextField(String placeholder) {
+        return new PlaceholderTextField("", placeholder);
+    }
+
+    private PlaceholderTextField createDarkTextFieldWithText(String text) {
+        return new PlaceholderTextField(text, "");
+    }
+
+    private void styleDarkComboBox(JComboBox<?> box) {
+        box.setBackground(COLOR_BG_CARD);
+        box.setForeground(COLOR_TEXT_PRIMARY);
+        box.setFocusable(false);
+        box.setBorder(BorderFactory.createCompoundBorder(
                 new LineBorder(COLOR_BORDER, 1),
-                new EmptyBorder(5, 8, 5, 8)
+                new EmptyBorder(2, 8, 2, 8)
         ));
-        return tf;
+
+        box.setUI(new javax.swing.plaf.basic.BasicComboBoxUI() {
+            @Override
+            protected JButton createArrowButton() {
+                JButton btn = new JButton("▼");
+                btn.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+                btn.setForeground(COLOR_TEXT_MUTED);
+                btn.setBackground(COLOR_BG_CARD);
+                btn.setBorder(BorderFactory.createEmptyBorder(0, 4, 0, 4));
+                btn.setContentAreaFilled(false);
+                btn.setFocusPainted(false);
+                btn.setOpaque(false);
+                return btn;
+            }
+
+            @Override
+            public void paintCurrentValueBackground(Graphics g, Rectangle bounds, boolean hasFocus) {
+                g.setColor(COLOR_BG_CARD);
+                g.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
+            }
+        });
+
+        box.setRenderer(new DefaultListCellRenderer() {
+            private static final long serialVersionUID = 1L;
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
+                JLabel lbl = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                lbl.setFont(new Font("Segoe UI", Font.BOLD, 13));
+                lbl.setBorder(new EmptyBorder(6, 12, 6, 12));
+                if (isSelected) {
+                    lbl.setBackground(COLOR_BLUE);
+                    lbl.setForeground(Color.WHITE);
+                } else {
+                    lbl.setBackground(COLOR_BG_CARD);
+                    lbl.setForeground(COLOR_TEXT_PRIMARY);
+                }
+                if (value instanceof ClusterRegistry.ClusterProfile cp) {
+                    lbl.setText(cp.name);
+                } else if (value != null) {
+                    lbl.setText(value.toString());
+                }
+                return lbl;
+            }
+        });
+    }
+
+    private void styleDarkSpinner(JSpinner spinner, int width, int height) {
+        spinner.setBackground(COLOR_BG_INPUT);
+        spinner.setBorder(BorderFactory.createCompoundBorder(
+                new LineBorder(COLOR_BORDER, 1),
+                new EmptyBorder(1, 4, 1, 1)
+        ));
+        spinner.setPreferredSize(new Dimension(width, height));
+        spinner.setMaximumSize(new Dimension(width, height));
+
+        JComponent editor = spinner.getEditor();
+        if (editor instanceof JSpinner.DefaultEditor defaultEditor) {
+            JFormattedTextField tf = defaultEditor.getTextField();
+            tf.setBackground(COLOR_BG_INPUT);
+            tf.setForeground(COLOR_TEXT_PRIMARY);
+            tf.setCaretColor(COLOR_TEXT_PRIMARY);
+            tf.setFont(new Font("Segoe UI", Font.BOLD, 12));
+            tf.setHorizontalAlignment(JTextField.CENTER);
+            tf.setBorder(BorderFactory.createEmptyBorder(0, 4, 0, 4));
+        }
+
+        for (Component c : spinner.getComponents()) {
+            if (c instanceof JButton btn) {
+                btn.setBackground(COLOR_BG_CARD);
+                btn.setForeground(COLOR_TEXT_MUTED);
+                btn.setBorder(new LineBorder(COLOR_BORDER, 1));
+                btn.setFocusPainted(false);
+                btn.setFocusable(false);
+            }
+        }
+    }
+
+    private void onClusterSelected() {
+        Object item = clusterSelector.getSelectedItem();
+        if (item instanceof ClusterRegistry.ClusterProfile profile) {
+            if (isServerRunning) {
+                JOptionPane.showMessageDialog(this,
+                        "Cannot switch cluster while a server is currently running!\nPlease shut down the server first.",
+                        "Cluster Switcher Locked", JOptionPane.WARNING_MESSAGE);
+                refreshClusterSelectorItems();
+                return;
+            }
+            if (!profile.path.equals(rootDir.toAbsolutePath().toString())) {
+                Path newPath = Paths.get(profile.path);
+                if (Files.exists(newPath)) {
+                    this.rootDir = newPath;
+                    clusterRegistry.setActiveClusterId(profile.id);
+                    hostSubtitle.setText("Host: " + ServerLauncher.getHostName() + " | Local Storage: " + rootDir.toString());
+                    appendConsoleLog("[Cluster Switcher] Active cluster switched to: " + profile.name);
+                    loadSettingsIntoFields();
+                    refreshCloudLockStatus();
+                    resetMilestones();
+                } else {
+                    JOptionPane.showMessageDialog(this,
+                            "Directory for cluster '" + profile.name + "' not found at:\n" + profile.path,
+                            "Cluster Directory Missing", JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }
+    }
+
+    private void refreshClusterSelectorItems() {
+        if (clusterSelector == null) return;
+        clusterSelector.removeActionListener(clusterSelectorListener);
+        clusterSelector.removeAllItems();
+        java.util.List<ClusterRegistry.ClusterProfile> list = clusterRegistry.getClusters();
+        ClusterRegistry.ClusterProfile active = clusterRegistry.getActiveCluster();
+        ClusterRegistry.ClusterProfile toSelect = null;
+        for (ClusterRegistry.ClusterProfile cp : list) {
+            clusterSelector.addItem(cp);
+            if (active != null && cp.id.equalsIgnoreCase(active.id)) {
+                toSelect = cp;
+            }
+        }
+        if (toSelect != null) {
+            clusterSelector.setSelectedItem(toSelect);
+        }
+        clusterSelector.addActionListener(clusterSelectorListener);
+    }
+
+    private void exportStarterPackAction() {
+        JFileChooser fc = new JFileChooser();
+        fc.setDialogTitle("Export Cohost Starter Pack");
+        fc.setSelectedFile(new File(rootDir.toFile(), "cohost-starterpack.zip"));
+        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Zip Archives (*.zip)", "zip"));
+
+        int res = fc.showSaveDialog(this);
+        if (res == JFileChooser.APPROVE_OPTION) {
+            File dest = fc.getSelectedFile();
+            if (!dest.getName().toLowerCase().endsWith(".zip")) {
+                dest = new File(dest.getParentFile(), dest.getName() + ".zip");
+            }
+            final File finalDest = dest;
+            appendConsoleLog("[Starter Pack] Packaging cohost-starterpack.zip to " + finalDest.getAbsolutePath() + "...");
+            workerPool.submit(() -> {
+                try {
+                    ServerLauncher.exportStarterPack(rootDir, finalDest.toPath(), msg -> SwingUtilities.invokeLater(() -> appendConsoleLog(msg)));
+                    SwingUtilities.invokeLater(() -> {
+                        JOptionPane.showMessageDialog(this,
+                                "Starter Pack successfully exported!\n\n" +
+                                "Saved to: " + finalDest.getAbsolutePath() + "\nSize: " + String.format("%.2f MB", finalDest.length() / (1024.0 * 1024.0)) + "\n\n" +
+                                "Share this file with your co-hosts via Google Drive, OneDrive, or Discord.\n" +
+                                "When they import it, they will be 100% onboarded with 0 MB of Backblaze download quota spent!",
+                                "Starter Pack Ready", JOptionPane.INFORMATION_MESSAGE);
+                    });
+                } catch (Exception ex) {
+                    SwingUtilities.invokeLater(() -> {
+                        JOptionPane.showMessageDialog(this,
+                                "Export failed:\n" + ex.getMessage(),
+                                "Export Error", JOptionPane.ERROR_MESSAGE);
+                        appendConsoleLog("[ERROR] Failed to export starter pack: " + ex.getMessage());
+                    });
+                }
+            });
+        }
+    }
+
+    private void showImportClusterDialog() {
+        if (isServerRunning) {
+            JOptionPane.showMessageDialog(this,
+                    "Cannot import or switch clusters while a server is currently running!\nPlease shut down the server first.",
+                    "Cluster Switcher Locked", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        JFileChooser fc = new JFileChooser();
+        fc.setDialogTitle("Select Cohost Starter Pack Zip");
+        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Cohost Starter Pack (*.zip)", "zip"));
+
+        int res = fc.showOpenDialog(this);
+        if (res == JFileChooser.APPROVE_OPTION) {
+            File zipFile = fc.getSelectedFile();
+            String defaultName = zipFile.getName().replace(".zip", "");
+            if (defaultName.equalsIgnoreCase("cohost-starterpack")) {
+                defaultName = "Dorm-Craft-SMP";
+            }
+
+            String clusterName = JOptionPane.showInputDialog(this,
+                    "Enter a name or identifier for this cluster workspace:",
+                    defaultName);
+            if (clusterName == null || clusterName.trim().isEmpty()) {
+                return;
+            }
+            clusterName = clusterName.trim();
+            String sanitizedFolder = clusterName.toLowerCase().replaceAll("[^a-z0-9_-]", "-");
+
+            Path storageRoot = Paths.get(clusterRegistry.getStorageRoot());
+            Path targetDir = storageRoot.resolve(sanitizedFolder);
+
+            if (Files.exists(targetDir)) {
+                int overwrite = JOptionPane.showConfirmDialog(this,
+                        "A cluster folder already exists at:\n" + targetDir + "\n\nDo you want to overwrite it?",
+                        "Cluster Already Exists", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                if (overwrite != JOptionPane.YES_OPTION) {
+                    return;
+                }
+            }
+
+            final String finalClusterName = clusterName;
+            appendConsoleLog("[Starter Pack] Importing cluster into " + targetDir + "...");
+
+            workerPool.submit(() -> {
+                try {
+                    String clusterId = ServerLauncher.importStarterPack(zipFile.toPath(), targetDir, clusterRegistry,
+                            msg -> SwingUtilities.invokeLater(() -> appendConsoleLog(msg)));
+                    appendConsoleLog("[Starter Pack] Successfully registered cluster profile: " + clusterId);
+
+                    SwingUtilities.invokeLater(() -> {
+                        this.rootDir = targetDir;
+                        refreshClusterSelectorItems();
+                        hostSubtitle.setText("Host: " + ServerLauncher.getHostName() + " | Local Storage: " + rootDir.toString());
+                        loadSettingsIntoFields();
+                        refreshCloudLockStatus();
+                        resetMilestones();
+                        masterLayout.show(masterContainer, "VIEW_MAIN_APP");
+                        JOptionPane.showMessageDialog(this,
+                                "Cluster '" + finalClusterName + "' successfully imported!\n" +
+                                "Workspace: " + targetDir.toString() + "\n\n" +
+                                "All world files, plugins, and configurations are ready with 0 MB cloud egress spent.",
+                                "Import Complete", JOptionPane.INFORMATION_MESSAGE);
+                    });
+                } catch (Exception ex) {
+                    SwingUtilities.invokeLater(() -> {
+                        JOptionPane.showMessageDialog(this,
+                                "Failed to import starter pack:\n" + ex.getMessage(),
+                                "Import Error", JOptionPane.ERROR_MESSAGE);
+                        appendConsoleLog("[ERROR] Import failed: " + ex.getMessage());
+                    });
+                }
+            });
+        }
     }
 
     public static void launch(Path rootDir) {
@@ -1838,6 +2288,69 @@ public class ClusterGUI extends JFrame {
     // =========================================================================
     // Custom Modern UI Components (Bypasses Windows Native Button Washing)
     // =========================================================================
+
+    public static class PlaceholderTextField extends JTextField {
+        private static final long serialVersionUID = 1L;
+        private String placeholder;
+
+        public PlaceholderTextField() {
+            this("", "");
+        }
+
+        public PlaceholderTextField(String placeholder) {
+            this("", placeholder);
+        }
+
+        public PlaceholderTextField(String text, String placeholder) {
+            super(text != null ? text : "");
+            this.placeholder = placeholder != null ? placeholder : "";
+            setBackground(COLOR_BG_INPUT);
+            setForeground(COLOR_TEXT_PRIMARY);
+            setCaretColor(COLOR_TEXT_PRIMARY);
+            setFont(new Font("Segoe UI", Font.PLAIN, 12));
+            setBorder(BorderFactory.createCompoundBorder(
+                    new LineBorder(COLOR_BORDER, 1),
+                    new EmptyBorder(6, 10, 6, 10)
+            ));
+            addFocusListener(new FocusAdapter() {
+                @Override
+                public void focusGained(FocusEvent e) {
+                    repaint();
+                }
+
+                @Override
+                public void focusLost(FocusEvent e) {
+                    repaint();
+                }
+            });
+        }
+
+        public void setPlaceholder(String placeholder) {
+            this.placeholder = placeholder;
+            repaint();
+        }
+
+        public String getPlaceholder() {
+            return placeholder;
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            if ((getText() == null || getText().isEmpty()) && placeholder != null && !placeholder.isEmpty() && !isFocusOwner()) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                g2.setColor(COLOR_TEXT_MUTED);
+                g2.setFont(getFont());
+                Insets insets = getInsets();
+                FontMetrics fm = g2.getFontMetrics();
+                int x = insets.left;
+                int y = (getHeight() - fm.getHeight()) / 2 + fm.getAscent();
+                g2.drawString(placeholder, x, y);
+                g2.dispose();
+            }
+        }
+    }
 
     public static class ModernCard extends JPanel {
         private final int radius;

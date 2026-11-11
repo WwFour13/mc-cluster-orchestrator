@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Minecraft Cluster Server
+Comment=Distributed Peer-to-Peer Minecraft Server Platform
+Exec=sh -c "cd \"$(dirname \"%k\")\" && ./MinecraftCluster"
+Icon=minecraft-cluster
+Terminal=false
+Categories=Game;Network;
+StartupNotify=true

@@ -47,11 +47,11 @@ if [ "\$JAVA_VER" -lt 17 ] 2>/dev/null; then
     exit 1
 fi
 
-osascript -e "tell application \"Terminal\" to do script \"cd \\\"$SERVER_DIR\\\" && ./START_SERVER.command\""
+osascript -e "tell application \"Terminal\" to do script \"cd \\\"$SERVER_DIR\\\" && ./LAUNCH_ORCHESTRATOR.command\""
 EOF
 
 chmod +x "$APP_DIR/Contents/MacOS/run.sh"
-chmod +x "$SERVER_DIR/START_SERVER.command"
+chmod +x "$SERVER_DIR/LAUNCH_ORCHESTRATOR.command"
 
 echo ""
 echo "========================================================"

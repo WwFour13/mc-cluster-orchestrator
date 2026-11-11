@@ -30,3 +30,7 @@ world_the_end/
 logs/
 crash-reports/
 cache/
+
+plan.md
+scratch/
+scratch/*

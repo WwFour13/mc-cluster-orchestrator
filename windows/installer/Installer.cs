@@ -222,25 +222,48 @@ namespace MinecraftClusterInstaller
                 UpdateStatus("Installation complete! Launching Minecraft Cluster...", 100);
                 Thread.Sleep(1000);
 
-                string launcherBat = Path.Combine(targetDirectory, "START_SERVER.bat");
-                if (File.Exists(launcherBat))
+                string launcherExe = Path.Combine(targetDirectory, "MinecraftCluster.exe");
+                if (File.Exists(launcherExe))
                 {
                     ProcessStartInfo psi = new ProcessStartInfo
                     {
-                        FileName = launcherBat,
+                        FileName = launcherExe,
                         WorkingDirectory = targetDirectory,
-                        UseShellExecute = true,
-                        WindowStyle = ProcessWindowStyle.Hidden
+                        UseShellExecute = true
                     };
                     Process.Start(psi);
+                }
+                else
+                {
+                    string launcherBat = Path.Combine(targetDirectory, "LAUNCH_ORCHESTRATOR.bat");
+                    if (!File.Exists(launcherBat))
+                    {
+                        launcherBat = Path.Combine(targetDirectory, "START_SERVER.bat");
+                    }
+                    if (File.Exists(launcherBat))
+                    {
+                        ProcessStartInfo psi = new ProcessStartInfo
+                        {
+                            FileName = launcherBat,
+                            WorkingDirectory = targetDirectory,
+                            UseShellExecute = true,
+                            WindowStyle = ProcessWindowStyle.Hidden
+                        };
+                        Process.Start(psi);
+                    }
                 }
 
                 this.Invoke(new Action(() => this.Close()));
             }
             catch (Exception ex)
             {
-                UpdateStatus("Error: " + ex.Message, 0);
-                MessageBox.Show("Installation failed:\n" + ex.Message, "Setup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Exception displayEx = ex;
+                if (displayEx is AggregateException && displayEx.InnerException != null)
+                {
+                    displayEx = displayEx.InnerException;
+                }
+                UpdateStatus("Error: " + displayEx.Message, 0);
+                MessageBox.Show("Installation failed:\n" + displayEx.Message, "Setup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 if (this.InvokeRequired)
                 {
                     this.Invoke(new Action(() => { installBtn.Enabled = true; }));
@@ -373,7 +396,7 @@ namespace MinecraftClusterInstaller
                 using (StreamReader sr = new StreamReader(resp.GetResponseStream()))
                 {
                     string json = sr.ReadToEnd();
-                    Match m = Regex.Match(json, "\"browser_download_url\":\\s*\"(https://[^\"]+cohost-windows\\.zip)\"");
+                    Match m = Regex.Match(json, "\"browser_download_url\":\\s*\"(https://[^\"]+(?:cohost-windows|Minecraft-Cluster-Windows(?:-Portable)?)\\.zip)\"");
                     if (m.Success)
                     {
                         return m.Groups[1].Value;
@@ -383,15 +406,23 @@ namespace MinecraftClusterInstaller
             catch { }
 
             // Direct fallback URL
-            return "https://github.com/" + GITHUB_REPO + "/releases/latest/download/cohost-windows.zip";
+            return "https://github.com/" + GITHUB_REPO + "/releases/latest/download/Minecraft-Cluster-Windows-Portable.zip";
         }
 
         private void CreateShortcuts()
         {
             string desktopDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             string startMenuDir = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
-            string targetBat = Path.Combine(targetDirectory, "START_SERVER.bat");
+            string targetExe = Path.Combine(targetDirectory, "MinecraftCluster.exe");
+            string targetBat = Path.Combine(targetDirectory, "LAUNCH_ORCHESTRATOR.bat");
+            if (!File.Exists(targetBat))
+            {
+                targetBat = Path.Combine(targetDirectory, "START_SERVER.bat");
+            }
             string iconPath = Path.Combine(targetDirectory, "bin\\icon.ico");
+
+            string finalTarget = File.Exists(targetExe) ? targetExe : targetBat;
+            bool isExe = File.Exists(targetExe);
 
             string script = string.Format(@"
 $wsh = New-Object -ComObject WScript.Shell
@@ -400,27 +431,40 @@ $programs = '{1}'
 $target = '{2}'
 $dir = '{3}'
 $icon = '{4}'
+$isExe = {5}
 
 # 1. Desktop
 $s1 = $wsh.CreateShortcut((Join-Path $desktop 'Minecraft Cluster Server.lnk'))
-$s1.TargetPath = $env:ComSpec
-$s1.Arguments = '/c `""' + $target + '`""'
+if ($isExe) {{
+    $s1.TargetPath = $target
+    $s1.Arguments = ''
+    $s1.IconLocation = ""$target,0""
+}} else {{
+    $s1.TargetPath = $env:ComSpec
+    $s1.Arguments = '/c `""' + $target + '`""'
+    if (Test-Path $icon) {{ $s1.IconLocation = ""$icon,0"" }}
+}}
 $s1.WorkingDirectory = $dir
 $s1.WindowStyle = 7
-if (Test-Path $icon) {{ $s1.IconLocation = ""$icon,0"" }}
-$s1.Description = 'Start Minecraft Cluster Server'
+$s1.Description = 'Open Minecraft Cluster Orchestrator'
 $s1.Save()
 
 # 2. Start Menu
 $s2 = $wsh.CreateShortcut((Join-Path $programs 'Minecraft Cluster Server.lnk'))
-$s2.TargetPath = $env:ComSpec
-$s2.Arguments = '/c `""' + $target + '`""'
+if ($isExe) {{
+    $s2.TargetPath = $target
+    $s2.Arguments = ''
+    $s2.IconLocation = ""$target,0""
+}} else {{
+    $s2.TargetPath = $env:ComSpec
+    $s2.Arguments = '/c `""' + $target + '`""'
+    if (Test-Path $icon) {{ $s2.IconLocation = ""$icon,0"" }}
+}}
 $s2.WorkingDirectory = $dir
 $s2.WindowStyle = 7
-if (Test-Path $icon) {{ $s2.IconLocation = ""$icon,0"" }}
-$s2.Description = 'Start Minecraft Cluster Server'
+$s2.Description = 'Open Minecraft Cluster Orchestrator'
 $s2.Save()
-", desktopDir.Replace("'", "''"), startMenuDir.Replace("'", "''"), targetBat.Replace("'", "''"), targetDirectory.Replace("'", "''"), iconPath.Replace("'", "''"));
+", desktopDir.Replace("'", "''"), startMenuDir.Replace("'", "''"), finalTarget.Replace("'", "''"), targetDirectory.Replace("'", "''"), iconPath.Replace("'", "''"), isExe ? "$true" : "$false");
 
             ProcessStartInfo psi = new ProcessStartInfo
             {
