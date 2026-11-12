@@ -41,7 +41,7 @@ mkdir -p "$GUARD_DIR/target-build"
 
 if [ -n "$CP" ]; then
     echo "[2/3] Compiling ClusterGuard.java..."
-    javac -encoding UTF-8 -cp "$CP" -d "$GUARD_DIR/target-build" "$GUARD_DIR/src/main/java/com/cluster/guard/ClusterGuard.java"
+    javac --release 21 -encoding UTF-8 -cp "$CP" -d "$GUARD_DIR/target-build" "$GUARD_DIR/src/main/java/com/cluster/guard/ClusterGuard.java"
     cp "$GUARD_DIR/src/main/resources/plugin.yml" "$GUARD_DIR/target-build/plugin.yml"
     
     echo "[3/3] Packaging and deploying ClusterGuard.jar..."

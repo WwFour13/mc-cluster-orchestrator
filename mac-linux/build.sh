@@ -18,7 +18,7 @@ echo "[1/3] Compiling ServerLauncher.java..."
 rm -rf "$ORCH_DIR/build_out"
 mkdir -p "$ORCH_DIR/build_out/META-INF"
 
-javac -encoding UTF-8 -d "$ORCH_DIR/build_out" "$ORCH_DIR/src/ServerLauncher.java"
+javac --release 21 -encoding UTF-8 -d "$ORCH_DIR/build_out" "$ORCH_DIR/src/ServerLauncher.java"
 
 # 3. Write Manifest & Package ServerLauncher.jar
 echo "[2/3] Packaging ServerLauncher.jar..."

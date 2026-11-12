@@ -16,7 +16,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.1";
+    public static final String APP_VERSION = "2.1.2";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -585,6 +585,34 @@ public class ServerLauncher {
 
         int cloudGen = readCloudGeneration(rootDir, rclone, b2Target);
         int localGen = readLocalGeneration(rootDir);
+
+        // Zero-Egress Generation Short-Circuit:
+        // If local generation matches cloud generation and local world exists, skip downloading
+        if (localGen > 0 && cloudGen > 0 && localGen == cloudGen && !isWorldEmpty(rootDir)) {
+            System.out.printf("[B2 Sync] Local base matches Cloud Generation #%d. Zero-egress bypass active (0 MB cloud download).%n", cloudGen);
+            return true;
+        }
+
+        // Quota Cap Resilience: If cloud is quota-capped but local world exists, allow local run
+        if (cloudGen == -1 && !isWorldEmpty(rootDir)) {
+            System.out.println("[B2 Sync] Backblaze B2 daily download quota is active, but local world is intact.");
+            System.out.printf("[B2 Sync] Launching existing local world (Generation #%d). Progress will push upon shutdown.%n", localGen);
+            return true;
+        }
+
+        // Pre-Flight Egress Guard Calculation
+        double estMb = estimateEgressMb(rootDir, rclone, b2Target);
+        if (estMb > 600.0 || (estMb > 0 && isWorldEmpty(rootDir))) {
+            System.err.println("\n========================================================");
+            System.err.printf("[EGRESS GUARD] Cloud download of %.1f MB blocked to preserve cluster daily quota.%n", estMb);
+            System.err.println("  Downloading this volume risks locking out the entire cluster for 24 hours.");
+            System.err.println("  Tip: Ask the active host for a 'cohost-files-YYYY-MM-DD.zip' to sync with zero cloud egress.");
+            System.err.println("========================================================\n");
+            return false;
+        } else if (estMb >= 350.0) {
+            System.out.printf("[B2 Sync Advisory] Notice: Inbound sync will download %.1f MB (~%.0f%% of daily quota).%n", estMb, (estMb / 1000.0) * 100);
+        }
+
         boolean forceChecksum = (cloudGen > localGen);
 
         System.out.printf("[B2 Sync] Pulling latest state from Backblaze B2 (Cloud Gen #%d vs Local Gen #%d)...%n", cloudGen, localGen);
@@ -617,7 +645,7 @@ public class ServerLauncher {
                 System.err.printf("  Free quota resets automatically at 00:00 UTC (in %s).%n", getTimeUntilUtcMidnightFormatted());
                 System.err.println("  Purging incomplete temporary download artifacts...");
                 purgeTemporaryFiles(rootDir);
-                System.err.println("  Tip: Admins can export a 'cohost-starterpack.zip' to onboard without cloud egress.");
+                System.err.println("  Tip: Admins can export a 'cohost-files-YYYY-MM-DD.zip' to onboard without cloud egress.");
                 System.err.println("========================================================\n");
             } else {
                 System.err.println("[WARN] Inbound sync returned code " + res.exitCode + ": " + res.stderr);
@@ -744,6 +772,9 @@ public class ServerLauncher {
         CommandResult res = runCommand(rootDir, rclone, "cat", b2Target + "/manifest.json");
         if (res.exitCode == 0 && !res.stdout.isEmpty()) {
             return extractJsonInt(res.stdout, "generation", 1);
+        }
+        if (isQuotaExceeded(res)) {
+            return -1;
         }
         return 1;
     }
@@ -1253,18 +1284,73 @@ public class ServerLauncher {
     public static boolean isWorldEmpty(Path rootDir) {
         Path worldDir = rootDir.resolve("world");
         if (!Files.exists(worldDir)) return true;
+
+        // 1. Check standard Spigot/Paper region folder
         Path regionDir = worldDir.resolve("region");
-        if (!Files.exists(regionDir)) return true;
-        try (var stream = Files.list(regionDir)) {
-            return stream.noneMatch(p -> p.getFileName().toString().endsWith(".mca"));
-        } catch (Exception e) {
+        if (Files.exists(regionDir)) {
+            try (var stream = Files.list(regionDir)) {
+                if (stream.anyMatch(p -> p.getFileName().toString().endsWith(".mca"))) {
+                    return false;
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 2. Check modern multi-dimension overworld region folder
+        Path dimRegionDir = worldDir.resolve("dimensions").resolve("minecraft").resolve("overworld").resolve("region");
+        if (Files.exists(dimRegionDir)) {
+            try (var stream = Files.list(dimRegionDir)) {
+                if (stream.anyMatch(p -> p.getFileName().toString().endsWith(".mca"))) {
+                    return false;
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 3. Check level.dat as primary indicator of a valid world save
+        if (Files.exists(worldDir.resolve("level.dat"))) {
             return false;
         }
+
+        return true;
+    }
+
+    public static double estimateEgressMb(Path rootDir, String rclone, String b2Target) {
+        if (b2Target == null || b2Target.isEmpty()) return 0.0;
+        Path filterPath = rootDir.resolve("rclone-filter.txt");
+        List<String> cmd = new ArrayList<>();
+        cmd.add(rclone);
+        cmd.add("copy");
+        cmd.add(b2Target);
+        cmd.add(".");
+        if (Files.exists(filterPath)) {
+            cmd.add("--filter-from");
+            cmd.add(filterPath.toString());
+        }
+        cmd.add("--fast-list");
+        cmd.add("--checksum");
+        cmd.add("--dry-run");
+
+        CommandResult res = runCommand(rootDir, cmd.toArray(new String[0]));
+        return parseTransferredMb(res.stdout + " " + res.stderr);
+    }
+
+    public static double parseTransferredMb(String output) {
+        if (output == null || output.isEmpty()) return 0.0;
+        Pattern p = Pattern.compile("Transferred:\\s+([0-9.]+)\\s+(KiB|MiB|GiB|B|Bytes)", Pattern.CASE_INSENSITIVE);
+        Matcher m = p.matcher(output);
+        if (m.find()) {
+            double val = Double.parseDouble(m.group(1));
+            String unit = m.group(2).toLowerCase();
+            if (unit.contains("gib")) return val * 1024.0;
+            if (unit.contains("mib")) return val;
+            if (unit.contains("kib")) return val / 1024.0;
+            return val / (1024.0 * 1024.0);
+        }
+        return 0.0;
     }
 
     public static void exportStarterPack(Path rootDir, Path destZipPath, java.util.function.Consumer<String> logger) throws IOException {
         if (logger == null) logger = System.out::println;
-        logger.accept("[Starter Pack] Initializing export from " + rootDir + "...");
+        logger.accept("[Co-host Sync] Initializing package export from " + rootDir + "...");
 
         // Ensure eula.txt is set to eula=true
         Path eulaFile = rootDir.resolve("eula.txt");
@@ -1282,30 +1368,40 @@ public class ServerLauncher {
             // 1. Export world/ directory
             Path worldDir = rootDir.resolve("world");
             if (Files.exists(worldDir)) {
-                logger.accept("[Starter Pack] Packaging world save data...");
+                logger.accept("[Co-host Sync] Packaging world save data...");
                 addDirectoryToZip(worldDir, "world", zos, logger);
             }
 
             // 2. Export plugins/ directory
             Path pluginsDir = rootDir.resolve("plugins");
             if (Files.exists(pluginsDir)) {
-                logger.accept("[Starter Pack] Packaging plugins and configurations...");
+                logger.accept("[Co-host Sync] Packaging plugins and configurations...");
                 addDirectoryToZip(pluginsDir, "plugins", zos, logger);
             }
 
-            // 3. Export bin/core.dat
+            // 3. Export bin/ directory executables
             Path coreDat = rootDir.resolve("bin").resolve("core.dat");
             if (Files.exists(coreDat)) {
-                logger.accept("[Starter Pack] Packaging core.dat (Paper server runtime)...");
+                logger.accept("[Co-host Sync] Packaging core.dat (Paper server runtime)...");
                 addFileToZip(coreDat, "bin/core.dat", zos);
             }
+            Path rcloneExe = rootDir.resolve("bin").resolve("rclone.exe");
+            if (Files.exists(rcloneExe)) {
+                logger.accept("[Co-host Sync] Packaging rclone.exe (Cloud sync binary)...");
+                addFileToZip(rcloneExe, "bin/rclone.exe", zos);
+            }
+            Path iconIco = rootDir.resolve("bin").resolve("icon.ico");
+            if (Files.exists(iconIco)) {
+                addFileToZip(iconIco, "bin/icon.ico", zos);
+            }
 
-            // 4. Export configuration and server properties
+            // 4. Export configuration, executables and server properties (Excluding config.json to protect cloud keys)
             String[] configFiles = {
-                    "config.json", "server.properties", "server-icon.png", "spigot.yml",
+                    "server.properties", "server-icon.png", "spigot.yml",
                     "bukkit.yml", "commands.yml", "ops.json", "whitelist.json", "banned-players.json",
                     "banned-ips.json", "eula.txt", "LAUNCH_ORCHESTRATOR.bat", "START_SERVER.bat",
-                    "rclone-filter.txt", "admin-dist-filter.txt"
+                    "rclone-filter.txt", "admin-dist-filter.txt", "MinecraftCluster.exe", "ServerLauncher.jar",
+                    "playit.toml"
             };
 
             for (String fName : configFiles) {
@@ -1315,7 +1411,22 @@ public class ServerLauncher {
                 }
             }
 
-            logger.accept("[Starter Pack] Archive packaging complete: " + destZipPath.getFileName());
+            // 5. Ensure manifest.json is embedded with the local generation
+            Path manifestPath = rootDir.resolve("manifest.json");
+            int localGen = readLocalGeneration(rootDir);
+            String mJson;
+            if (Files.exists(manifestPath)) {
+                mJson = Files.readString(manifestPath);
+            } else {
+                mJson = String.format("{\"generation\":%d,\"last_host\":\"%s\",\"timestamp\":\"%s\",\"orchestrator_version\":\"%s\"}",
+                        localGen, getHostName(), DateTimeFormatter.ISO_INSTANT.format(Instant.now()), APP_VERSION);
+            }
+            ZipEntry entry = new ZipEntry("manifest.json");
+            zos.putNextEntry(entry);
+            zos.write(mJson.getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+
+            logger.accept("[Co-host Sync] Archive packaging complete: " + destZipPath.getFileName());
         }
     }
 
@@ -1409,5 +1520,53 @@ public class ServerLauncher {
         }
 
         return clusterId;
+    }
+
+    public static int updateClusterInPlace(Path zipPath, Path rootDir, java.util.function.Consumer<String> logger) throws IOException {
+        if (logger == null) logger = System.out::println;
+        logger.accept("[Co-host Sync] Updating active cluster from " + zipPath.getFileName() + "...");
+
+        int newGen = -1;
+        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(zipPath)))) {
+            ZipEntry entry;
+            byte[] buf = new byte[8192];
+            while ((entry = zis.getNextEntry()) != null) {
+                String name = entry.getName();
+                // Never overwrite existing local config.json to preserve local machine preferences & keys
+                if ("config.json".equalsIgnoreCase(name) && Files.exists(rootDir.resolve("config.json"))) {
+                    zis.closeEntry();
+                    continue;
+                }
+                Path outPath = rootDir.resolve(name);
+                if (entry.isDirectory()) {
+                    Files.createDirectories(outPath);
+                } else {
+                    if (outPath.getParent() != null) {
+                        Files.createDirectories(outPath.getParent());
+                    }
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    int read;
+                    while ((read = zis.read(buf)) != -1) {
+                        baos.write(buf, 0, read);
+                    }
+                    byte[] data = baos.toByteArray();
+                    Files.write(outPath, data);
+                    if ("manifest.json".equalsIgnoreCase(name)) {
+                        try {
+                            String mJson = new String(data, StandardCharsets.UTF_8);
+                            newGen = extractJsonInt(mJson, "generation", -1);
+                        } catch (Exception ignored) {}
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+
+        if (newGen > 0) {
+            writeLocalGeneration(rootDir, newGen);
+            logger.accept("[Co-host Sync] Local world base updated to Generation #" + newGen);
+        }
+        logger.accept("[Co-host Sync] In-place cluster update complete! 0 MB cloud egress consumed.");
+        return newGen;
     }
 }

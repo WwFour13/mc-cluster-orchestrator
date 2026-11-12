@@ -86,6 +86,7 @@ namespace MinecraftCluster
                     psi.Arguments = "-jar \"" + jarPath + "\"";
                     psi.CreateNoWindow = true;
                     psi.WindowStyle = ProcessWindowStyle.Hidden;
+                    psi.RedirectStandardError = true;
                 }
 
                 try
@@ -93,6 +94,12 @@ namespace MinecraftCluster
                     using (Process proc = Process.Start(psi))
                     {
                         if (proc == null) return 1;
+
+                        string stdErr = null;
+                        if (psi.RedirectStandardError)
+                        {
+                            stdErr = proc.StandardError.ReadToEnd();
+                        }
 
                         proc.WaitForExit();
                         int exitCode = proc.ExitCode;
@@ -102,6 +109,16 @@ namespace MinecraftCluster
                         {
                             Thread.Sleep(500); // Allow file handles to release
                             continue;          // Loop and apply the update
+                        }
+
+                        if (exitCode != 0 && !string.IsNullOrWhiteSpace(stdErr))
+                        {
+                            MessageBox.Show(
+                                "Minecraft Cluster Orchestrator terminated unexpectedly:\n\n" + stdErr.Trim(),
+                                "Launch Error",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Error
+                            );
                         }
 
                         return exitCode;

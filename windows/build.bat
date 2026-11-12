@@ -38,7 +38,7 @@ if exist "%ORCH_DIR%\build_out" rd /s /q "%ORCH_DIR%\build_out"
 mkdir "%ORCH_DIR%\build_out\META-INF"
 
 dir /b /s "%ORCH_DIR%\src\*.java" > "%ORCH_DIR%\sources.txt"
-"%JAVAC_BIN%" -encoding UTF-8 -d "%ORCH_DIR%\build_out" @"%ORCH_DIR%\sources.txt"
+"%JAVAC_BIN%" --release 21 -encoding UTF-8 -d "%ORCH_DIR%\build_out" @"%ORCH_DIR%\sources.txt"
 set "COMPILE_STATUS=%ERRORLEVEL%"
 if exist "%ORCH_DIR%\sources.txt" del "%ORCH_DIR%\sources.txt"
 

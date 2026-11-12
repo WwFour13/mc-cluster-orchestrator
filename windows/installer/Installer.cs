@@ -373,6 +373,7 @@ namespace MinecraftClusterInstaller
 
                 UpdateStatus("[3/4] Extracting platform assets...", 80);
                 ZipFile.ExtractToDirectory(tempZip, targetDirectory);
+                FlattenNestedFolder(targetDirectory);
             }
             finally
             {
@@ -475,6 +476,20 @@ $s2.Save()
             };
             Process p = Process.Start(psi);
             if (p != null) p.WaitForExit(5000);
+        }
+
+        private void FlattenNestedFolder(string targetDir)
+        {
+            try
+            {
+                string nested = Path.Combine(targetDir, "minecraft-server");
+                if (Directory.Exists(nested))
+                {
+                    CopyDirectoryRecursive(nested, targetDir);
+                    try { Directory.Delete(nested, true); } catch { }
+                }
+            }
+            catch { }
         }
 
         private void CopyDirectoryRecursive(string source, string target)

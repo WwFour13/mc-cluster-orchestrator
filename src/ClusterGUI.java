@@ -597,22 +597,22 @@ public class ClusterGUI extends JFrame {
         starterPackCard.setBorder(new EmptyBorder(14, 18, 14, 18));
         starterPackCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 135));
 
-        JLabel starterTitle = new JLabel("COHOST STARTER PACK (ZERO CLOUD EGRESS)");
+        JLabel starterTitle = new JLabel("CO-HOST SYNC PACK (ZERO CLOUD EGRESS)");
         starterTitle.setFont(new Font("Segoe UI", Font.BOLD, 13));
         starterTitle.setForeground(COLOR_EMERALD);
 
-        JLabel starterDesc = new JLabel("Package world, plugins, configs, and runtime into cohost-starterpack.zip to invite co-hosts without using Backblaze download quota.");
+        JLabel starterDesc = new JLabel("Export world, plugins, and runtime to 'cohost-files-YYYY-MM-DD.zip' to sync with co-hosts offline without spending Backblaze download quota.");
         starterDesc.setFont(new Font("Segoe UI", Font.PLAIN, 12));
         starterDesc.setForeground(COLOR_TEXT_MUTED);
 
         JPanel starterActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         starterActions.setOpaque(false);
 
-        ModernButton exportZipBtn = new ModernButton("📦 EXPORT STARTER PACK (.zip)", COLOR_EMERALD, Color.WHITE, 12, 8);
+        ModernButton exportZipBtn = new ModernButton("📦 EXPORT COHOST FILES (.zip)", COLOR_EMERALD, Color.WHITE, 12, 8);
         exportZipBtn.setPreferredSize(new Dimension(240, 42));
         exportZipBtn.addActionListener(e -> exportStarterPackAction());
 
-        ModernButton importZipBtn = new ModernButton("📁 IMPORT STARTER PACK (.zip)", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 8);
+        ModernButton importZipBtn = new ModernButton("📁 IMPORT COHOST FILES (.zip)", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 8);
         importZipBtn.setPreferredSize(new Dimension(240, 42));
         importZipBtn.addActionListener(e -> showImportClusterDialog());
 
@@ -1081,11 +1081,11 @@ public class ClusterGUI extends JFrame {
         starterCard.setLayout(new BorderLayout(0, 14));
         starterCard.setBorder(new EmptyBorder(26, 24, 26, 24));
 
-        JLabel starterIconTitle = new JLabel("📦 STARTER PACK", SwingConstants.CENTER);
+        JLabel starterIconTitle = new JLabel("📦 CO-HOST SYNC PACK", SwingConstants.CENTER);
         starterIconTitle.setFont(new Font("Segoe UI", Font.BOLD, 17));
         starterIconTitle.setForeground(COLOR_AMBER);
 
-        JTextArea starterText = new JTextArea("Received a cohost-starterpack.zip from your admin? Import it directly to set up world saves, plugins, and configs in seconds with zero Backblaze download bandwidth.");
+        JTextArea starterText = new JTextArea("Received a cohost-files-YYYY-MM-DD.zip from your cluster admin or co-host? Import it directly to set up world saves, plugins, and configs in seconds with zero Backblaze download bandwidth.");
         starterText.setFont(new Font("Segoe UI", Font.PLAIN, 12));
         starterText.setForeground(COLOR_TEXT_MUTED);
         starterText.setLineWrap(true);
@@ -1093,7 +1093,7 @@ public class ClusterGUI extends JFrame {
         starterText.setOpaque(false);
         starterText.setEditable(false);
 
-        ModernButton starterAction = new ModernButton("Import Starter Pack (.zip)", COLOR_AMBER, Color.WHITE, 13, 8);
+        ModernButton starterAction = new ModernButton("Import Co-Host File (.zip)", COLOR_AMBER, Color.WHITE, 13, 8);
         starterAction.setPreferredSize(new Dimension(200, 44));
         starterAction.addActionListener(e -> {
             showImportClusterDialog();
@@ -1494,21 +1494,57 @@ public class ClusterGUI extends JFrame {
 
                 // Milestone 3: World Sync
                 updateMilestoneStep(2, "3. Syncing Cloud...", COLOR_AMBER, 55);
-                appendConsoleLog("[Step 3/5] Pulling latest world generation & master runtime assets...");
-                ServerLauncher.syncAdminDistribution(rootDir, rclone, b2Target);
-                boolean syncOk = ServerLauncher.pullFromB2(rootDir, rclone, b2Target, staleMin, true);
-                if (!syncOk) {
-                    appendConsoleLog("[WARN] World sync did not complete cleanly.");
-                    if (ServerLauncher.isWorldEmpty(rootDir)) {
-                        String countdown = ServerLauncher.getTimeUntilUtcMidnightFormatted();
-                        abortLaunch("Backblaze B2 Daily Download Cap Exceeded (403 Cap)\n\n" +
-                                "The free tier daily bandwidth limit has been reached.\n" +
-                                "Quota resets automatically at 00:00 UTC (in " + countdown + ").\n\n" +
-                                "Workaround: Ask the server admin for a 'cohost-starterpack.zip' to onboard without cloud egress.");
+                appendConsoleLog("[Step 3/5] Verifying cloud generation & assessing bandwidth...");
+                int cloudGen = ServerLauncher.readCloudGeneration(rootDir, rclone, b2Target);
+                int localGen = ServerLauncher.readLocalGeneration(rootDir);
+
+                if (localGen > 0 && cloudGen > 0 && localGen == cloudGen && !ServerLauncher.isWorldEmpty(rootDir)) {
+                    appendConsoleLog(String.format("[B2 Sync] Local base matches Cloud Generation #%d. Zero-egress bypass active (0 MB downloaded).", cloudGen));
+                    updateMilestoneStep(2, "3. Synchronized (0 MB)", COLOR_EMERALD, 65);
+                } else {
+                    double estMb = ServerLauncher.estimateEgressMb(rootDir, rclone, b2Target);
+                    if (estMb > 600.0 || (estMb > 0 && ServerLauncher.isWorldEmpty(rootDir))) {
+                        abortLaunch(String.format("LARGE CLOUD DOWNLOAD BLOCKED (%.1f MB)\n\n" +
+                                "This download would consume over 60%% of the cluster's daily free bandwidth.\n" +
+                                "To prevent locking out the cluster, automatic cloud download is restricted.\n\n" +
+                                "Workaround: Ask the active host for a 'cohost-files-YYYY-MM-DD.zip' to sync with zero cloud egress.", estMb));
                         return;
+                    } else if (estMb >= 350.0) {
+                        final double finalEst = estMb;
+                        final int[] userChoice = new int[1];
+                        try {
+                            SwingUtilities.invokeAndWait(() -> {
+                                userChoice[0] = JOptionPane.showConfirmDialog(this,
+                                        String.format("Large Cloud Sync Advisory:\n\n" +
+                                                "Approximately %.1f MB of chunk diffs will be downloaded (~%.0f%% of daily quota).\n" +
+                                                "Do you want to proceed with cloud download, or cancel to import a co-host sync pack?",
+                                                finalEst, (finalEst / 1000.0) * 100),
+                                        "Cloud Bandwidth Advisory", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                            });
+                        } catch (Exception ignored) {}
+                        if (userChoice[0] != JOptionPane.YES_OPTION) {
+                            abortLaunch("Launch cancelled by user to preserve cloud download bandwidth.");
+                            return;
+                        }
                     }
+
+                    ServerLauncher.syncAdminDistribution(rootDir, rclone, b2Target);
+                    boolean syncOk = ServerLauncher.pullFromB2(rootDir, rclone, b2Target, staleMin, true);
+                    if (!syncOk) {
+                        appendConsoleLog("[WARN] World sync did not complete cleanly.");
+                        if (ServerLauncher.isWorldEmpty(rootDir)) {
+                            String countdown = ServerLauncher.getTimeUntilUtcMidnightFormatted();
+                            abortLaunch("Backblaze B2 Daily Download Cap Exceeded (403 Cap)\n\n" +
+                                    "The free tier daily bandwidth limit has been reached.\n" +
+                                    "Quota resets automatically at 00:00 UTC (in " + countdown + ").\n\n" +
+                                    "Workaround: Ask the active host for a 'cohost-files-YYYY-MM-DD.zip' to onboard without cloud egress.");
+                            return;
+                        } else {
+                            appendConsoleLog("[QUOTA NOTICE] Cloud sync was blocked by 403 quota, but local world is present. Launching local world...");
+                        }
+                    }
+                    updateMilestoneStep(2, "3. Synchronized", COLOR_EMERALD, 65);
                 }
-                updateMilestoneStep(2, "3. Synchronized", COLOR_EMERALD, 65);
 
                 // Playit Sidecar Daemon
                 String playitBin = ServerLauncher.findPlayit(rootDir);
@@ -1663,11 +1699,38 @@ public class ClusterGUI extends JFrame {
             resetMilestones();
             refreshCloudLockStatus();
             appendConsoleLog("[SUCCESS] Server stopped cleanly. Progress preserved in cloud.");
+
+            int newGen = ServerLauncher.readLocalGeneration(rootDir);
+            int prompt = JOptionPane.showConfirmDialog(this,
+                    "Session successfully saved and pushed to Generation #" + newGen + "!\n\n" +
+                    "Would you like to export an updated 'cohost-files-" + java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE) + ".zip'\n" +
+                    "to share with co-hosts so they can update offline with 0 MB cloud download bandwidth?",
+                    "Export Updated Co-Host Sync Pack?", JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE);
+            if (prompt == JOptionPane.YES_OPTION) {
+                exportStarterPackAction();
+            }
         });
     }
 
     private void abortLaunch(String reason) {
         isServerRunning = false;
+        workerPool.submit(() -> {
+            try {
+                Files.deleteIfExists(rootDir.resolve(".server_active.lock"));
+                Path cfg = rootDir.resolve("config.json");
+                if (Files.exists(cfg)) {
+                    String json = Files.readString(cfg);
+                    String bucket = ServerLauncher.extractJsonString(json, "b2_bucket");
+                    String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
+                    String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
+                    if (bucket != null && keyId != null && appKey != null) {
+                        String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+                        String rclone = ServerLauncher.findRclone(rootDir);
+                        ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
+                    }
+                }
+            } catch (Exception ignored) {}
+        });
         SwingUtilities.invokeLater(() -> {
             if (clusterSelector != null) clusterSelector.setEnabled(true);
             primaryActionBtn.setText("▶  START CLUSTER SERVER");
@@ -2251,8 +2314,9 @@ public class ClusterGUI extends JFrame {
 
     private void exportStarterPackAction() {
         JFileChooser fc = new JFileChooser();
-        fc.setDialogTitle("Export Cohost Starter Pack");
-        fc.setSelectedFile(new File(rootDir.toFile(), "cohost-starterpack.zip"));
+        fc.setDialogTitle("Export Co-Host Sync Pack");
+        String defaultZipName = "cohost-files-" + java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE) + ".zip";
+        fc.setSelectedFile(new File(rootDir.toFile(), defaultZipName));
         fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Zip Archives (*.zip)", "zip"));
 
         int res = fc.showSaveDialog(this);
@@ -2262,24 +2326,24 @@ public class ClusterGUI extends JFrame {
                 dest = new File(dest.getParentFile(), dest.getName() + ".zip");
             }
             final File finalDest = dest;
-            appendConsoleLog("[Starter Pack] Packaging cohost-starterpack.zip to " + finalDest.getAbsolutePath() + "...");
+            appendConsoleLog("[Co-host Sync] Packaging " + finalDest.getName() + " to " + finalDest.getAbsolutePath() + "...");
             workerPool.submit(() -> {
                 try {
                     ServerLauncher.exportStarterPack(rootDir, finalDest.toPath(), msg -> SwingUtilities.invokeLater(() -> appendConsoleLog(msg)));
                     SwingUtilities.invokeLater(() -> {
                         JOptionPane.showMessageDialog(this,
-                                "Starter Pack successfully exported!\n\n" +
+                                "Co-Host Sync Pack successfully exported!\n\n" +
                                 "Saved to: " + finalDest.getAbsolutePath() + "\nSize: " + String.format("%.2f MB", finalDest.length() / (1024.0 * 1024.0)) + "\n\n" +
                                 "Share this file with your co-hosts via Google Drive, OneDrive, or Discord.\n" +
-                                "When they import it, they will be 100% onboarded with 0 MB of Backblaze download quota spent!",
-                                "Starter Pack Ready", JOptionPane.INFORMATION_MESSAGE);
+                                "When they import it, their world will be up to date with 0 MB of Backblaze download quota spent!",
+                                "Sync Pack Ready", JOptionPane.INFORMATION_MESSAGE);
                     });
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
                         JOptionPane.showMessageDialog(this,
                                 "Export failed:\n" + ex.getMessage(),
                                 "Export Error", JOptionPane.ERROR_MESSAGE);
-                        appendConsoleLog("[ERROR] Failed to export starter pack: " + ex.getMessage());
+                        appendConsoleLog("[ERROR] Failed to export sync pack: " + ex.getMessage());
                     });
                 }
             });
@@ -2295,14 +2359,60 @@ public class ClusterGUI extends JFrame {
         }
 
         JFileChooser fc = new JFileChooser();
-        fc.setDialogTitle("Select Cohost Starter Pack Zip");
-        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Cohost Starter Pack (*.zip)", "zip"));
+        fc.setDialogTitle("Select Co-Host Sync Pack Zip");
+        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Co-Host Sync Pack (*.zip)", "zip"));
 
         int res = fc.showOpenDialog(this);
         if (res == JFileChooser.APPROVE_OPTION) {
             File zipFile = fc.getSelectedFile();
+
+            boolean hasActiveCluster = isConfigured() && rootDir != null && Files.exists(rootDir);
+            String currentClusterName = clusterSelector.getSelectedItem() != null ? clusterSelector.getSelectedItem().toString() : "Current Cluster";
+
+            if (hasActiveCluster) {
+                Object[] options = {"Update Active Cluster (" + currentClusterName + ")", "Create New Cluster Profile", "Cancel"};
+                int choice = JOptionPane.showOptionDialog(this,
+                        "How would you like to import this sync pack?\n\n" +
+                        "• Update Active Cluster: Overwrites world and plugins in your current workspace with the sender's files (0 MB cloud egress spent).\n" +
+                        "• Create New Cluster Profile: Sets up a brand new cluster directory and switcher profile.",
+                        "Import Co-Host Sync Pack",
+                        JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null,
+                        options, options[0]);
+
+                if (choice == 0) {
+                    // In-Place Update for Existing Hoster
+                    appendConsoleLog("[Co-host Sync] Updating active cluster from " + zipFile.getName() + "...");
+                    workerPool.submit(() -> {
+                        try {
+                            int newGen = ServerLauncher.updateClusterInPlace(zipFile.toPath(), rootDir,
+                                    msg -> SwingUtilities.invokeLater(() -> appendConsoleLog(msg)));
+                            SwingUtilities.invokeLater(() -> {
+                                refreshCloudLockStatus();
+                                resetMilestones();
+                                JOptionPane.showMessageDialog(this,
+                                        "Active cluster successfully updated!\n\n" +
+                                        (newGen > 0 ? "Local World Generation updated to: #" + newGen + "\n\n" : "") +
+                                        "World and plugins were updated from '" + zipFile.getName() + "'.\n" +
+                                        "You are ready to host with 0 MB of cloud egress!",
+                                        "Cluster Updated", JOptionPane.INFORMATION_MESSAGE);
+                            });
+                        } catch (Exception ex) {
+                            SwingUtilities.invokeLater(() -> {
+                                JOptionPane.showMessageDialog(this, "Failed to update cluster:\n" + ex.getMessage(), "Import Error", JOptionPane.ERROR_MESSAGE);
+                                appendConsoleLog("[ERROR] In-place update failed: " + ex.getMessage());
+                            });
+                        }
+                    });
+                    return;
+                } else if (choice != 1) {
+                    // Cancelled
+                    return;
+                }
+            }
+
+            // Create New Cluster Profile (Newcomers or adding secondary cluster)
             String defaultName = zipFile.getName().replace(".zip", "");
-            if (defaultName.equalsIgnoreCase("cohost-starterpack")) {
+            if (defaultName.toLowerCase().startsWith("cohost-files") || defaultName.equalsIgnoreCase("cohost-starterpack")) {
                 defaultName = "Dorm-Craft-SMP";
             }
 
@@ -2328,13 +2438,13 @@ public class ClusterGUI extends JFrame {
             }
 
             final String finalClusterName = clusterName;
-            appendConsoleLog("[Starter Pack] Importing cluster into " + targetDir + "...");
+            appendConsoleLog("[Co-host Sync] Importing cluster into " + targetDir + "...");
 
             workerPool.submit(() -> {
                 try {
                     String clusterId = ServerLauncher.importStarterPack(zipFile.toPath(), targetDir, clusterRegistry,
                             msg -> SwingUtilities.invokeLater(() -> appendConsoleLog(msg)));
-                    appendConsoleLog("[Starter Pack] Successfully registered cluster profile: " + clusterId);
+                    appendConsoleLog("[Co-host Sync] Successfully registered cluster profile: " + clusterId);
 
                     SwingUtilities.invokeLater(() -> {
                         this.rootDir = targetDir;
@@ -2353,7 +2463,7 @@ public class ClusterGUI extends JFrame {
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
                         JOptionPane.showMessageDialog(this,
-                                "Failed to import starter pack:\n" + ex.getMessage(),
+                                "Failed to import sync pack:\n" + ex.getMessage(),
                                 "Import Error", JOptionPane.ERROR_MESSAGE);
                         appendConsoleLog("[ERROR] Import failed: " + ex.getMessage());
                     });

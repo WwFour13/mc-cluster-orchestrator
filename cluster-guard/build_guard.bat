@@ -45,7 +45,7 @@ if exist "%GUARD_DIR%\target-build" rd /s /q "%GUARD_DIR%\target-build"
 mkdir "%GUARD_DIR%\target-build"
 
 echo [2/3] Compiling ClusterGuard.java...
-"%JAVAC_BIN%" -encoding UTF-8 -cp "!CP!" -d "%GUARD_DIR%\target-build" "%GUARD_DIR%\src\main\java\com\cluster\guard\ClusterGuard.java"
+"%JAVAC_BIN%" --release 21 -encoding UTF-8 -cp "!CP!" -d "%GUARD_DIR%\target-build" "%GUARD_DIR%\src\main\java\com\cluster\guard\ClusterGuard.java"
 if %ERRORLEVEL% neq 0 (
     echo [ERROR] Plugin compilation failed!
     rd /s /q "%GUARD_DIR%\target-build"

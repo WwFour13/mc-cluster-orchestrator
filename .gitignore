@@ -34,3 +34,7 @@ cache/
 plan.md
 scratch/
 scratch/*
+# Playit tunnel credentials
+playit.toml
+*.toml
+
