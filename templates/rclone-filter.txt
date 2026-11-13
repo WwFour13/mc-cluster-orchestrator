@@ -10,7 +10,6 @@
 # Allow orchestrator self-updates from cloud
 + /START_SERVER.bat
 + /START_SERVER.command
-+ /ServerLauncher.jar.update
 + /rclone-filter.txt
 
 # Exclude local credentials, locks, metadata, and scripts
@@ -23,6 +22,8 @@
 - session.lock
 - **/session.lock
 - remote_stop.signal
+- ServerLauncher.jar.update
+- *.update
 - *.bat
 - *.sh
 - *.command

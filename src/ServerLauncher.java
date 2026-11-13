@@ -32,7 +32,59 @@ public class ServerLauncher {
 
     public static record CommandResult(int exitCode, String stdout, String stderr) {}
 
+    public static Path getRunningJarPath() {
+        try {
+            File f = new File(ServerLauncher.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            if (f.isFile() && f.getName().endsWith(".jar")) {
+                return f.toPath().toAbsolutePath();
+            }
+        } catch (Exception ignored) {}
+        return Paths.get("ServerLauncher.jar").toAbsolutePath();
+    }
+
+    public static void applyUpdateAndRelaunch(Path targetJar, Path updateJar) {
+        if (!Files.exists(updateJar)) {
+            System.err.println("[Update] No update JAR found at: " + updateJar);
+            System.exit(1);
+            return;
+        }
+
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+        try {
+            Path parentDir = targetJar.getParent() != null ? targetJar.getParent() : Paths.get("").toAbsolutePath();
+            if (isWindows) {
+                String cmd = String.format("ping 127.0.0.1 -n 2 >nul & move /y \"%s\" \"%s\" & start \"\" javaw -jar \"%s\"",
+                        updateJar.toAbsolutePath(), targetJar.toAbsolutePath(), targetJar.toAbsolutePath());
+                new ProcessBuilder("cmd.exe", "/c", cmd)
+                        .directory(parentDir.toFile())
+                        .start();
+            } else {
+                String sh = String.format("sleep 1 && mv -f \"%s\" \"%s\" && (nohup java -jar \"%s\" >/dev/null 2>&1 &)",
+                        updateJar.toAbsolutePath(), targetJar.toAbsolutePath(), targetJar.toAbsolutePath());
+                new ProcessBuilder("sh", "-c", sh)
+                        .directory(parentDir.toFile())
+                        .start();
+            }
+            System.exit(0);
+        } catch (Exception e) {
+            e.printStackTrace();
+            System.exit(100);
+        }
+    }
+
     public static void main(String[] args) {
+        Path runningJar = getRunningJarPath();
+        Path pendingUpdate = runningJar.resolveSibling("ServerLauncher.jar.update");
+        if (Files.exists(pendingUpdate)) {
+            if (!isSameContent(runningJar, pendingUpdate)) {
+                System.out.println("[Startup] Detected pending orchestrator update payload. Applying and relaunching...");
+                applyUpdateAndRelaunch(runningJar, pendingUpdate);
+                return;
+            } else {
+                try { Files.deleteIfExists(pendingUpdate); } catch (Exception ignored) {}
+            }
+        }
+
         Path baseDir = Paths.get("").toAbsolutePath();
         if (!Files.exists(baseDir.resolve("config.json")) && Files.exists(baseDir.resolve("minecraft-server").resolve("config.json"))) {
             baseDir = baseDir.resolve("minecraft-server");
@@ -986,11 +1038,11 @@ public class ServerLauncher {
 
     public static boolean checkLauncherUpdate(Path rootDir, String rclone, String b2Target) {
         try {
-            Path updateJar = rootDir.resolve("ServerLauncher.jar.update");
+            Path runningJar = getRunningJarPath();
+            Path updateJar = runningJar.resolveSibling("ServerLauncher.jar.update");
             CommandResult res = runCommand(rootDir, rclone, "copyto", b2Target + "/ServerLauncher.jar", updateJar.toString(), "--update");
             if (res.exitCode == 0 && Files.exists(updateJar)) {
-                Path currentJar = rootDir.resolve("ServerLauncher.jar");
-                if (Files.exists(currentJar) && isSameContent(currentJar, updateJar)) {
+                if (Files.exists(runningJar) && isSameContent(runningJar, updateJar)) {
                     Files.deleteIfExists(updateJar);
                     return false;
                 }
@@ -998,6 +1050,7 @@ public class ServerLauncher {
                 System.out.println("[UPDATE] Downloaded updated ServerLauncher.jar from B2!");
                 System.out.println("  Applying update and restarting launcher automatically...");
                 System.out.println("========================================================\n");
+                applyUpdateAndRelaunch(runningJar, updateJar);
                 return true;
             }
         } catch (Exception ignored) {}
@@ -1018,6 +1071,10 @@ public class ServerLauncher {
         Path localBin = rootDir.resolve("bin").resolve(isWindows ? "rclone.exe" : "rclone");
         if (Files.exists(localBin)) {
             return localBin.toAbsolutePath().toString();
+        }
+        Path jarBin = getRunningJarPath().getParent().resolve("bin").resolve(isWindows ? "rclone.exe" : "rclone");
+        if (Files.exists(jarBin)) {
+            return jarBin.toAbsolutePath().toString();
         }
         String cmd = isWindows ? "where" : "which";
         try {

@@ -952,7 +952,8 @@ public class ClusterGUI extends JFrame {
                         if (cfg.bandwidthLimit() != null && !cfg.bandwidthLimit().isEmpty()) {
                             settingsBwLimitField.setText(cfg.bandwidthLimit());
                         }
-                        settingsTokenFeedbackLbl.setText("✔ Valid token decoded! Connected to bucket: " + cfg.bucket());
+                        saveSettingsFromFieldsInternal(false);
+                        settingsTokenFeedbackLbl.setText("✔ Valid token saved! Connected to bucket: " + cfg.bucket());
                         settingsTokenFeedbackLbl.setForeground(COLOR_EMERALD);
                         return;
                     }
@@ -1127,6 +1128,10 @@ public class ClusterGUI extends JFrame {
     }
 
     private void saveSettingsFromFields() {
+        saveSettingsFromFieldsInternal(true);
+    }
+
+    private void saveSettingsFromFieldsInternal(boolean showConfirmation) {
         try {
             Path cfg = rootDir.resolve("config.json");
             String domain = "";
@@ -1166,9 +1171,14 @@ public class ClusterGUI extends JFrame {
             loadSettingsIntoFields();
             updatePrimaryButtonState();
             refreshCloudLockStatus();
-            JOptionPane.showMessageDialog(this, "Configuration successfully saved!", "Settings Saved", JOptionPane.INFORMATION_MESSAGE);
+            refreshAdminTabState();
+            if (showConfirmation) {
+                JOptionPane.showMessageDialog(this, "Configuration successfully saved!", "Settings Saved", JOptionPane.INFORMATION_MESSAGE);
+            }
         } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this, "Failed to save settings: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+            if (showConfirmation) {
+                JOptionPane.showMessageDialog(this, "Failed to save settings: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+            }
         }
     }
 
@@ -1636,6 +1646,13 @@ public class ClusterGUI extends JFrame {
         sb.append("}\n");
         try {
             Files.writeString(cfg, sb.toString());
+            String clusterName = bucket;
+            ClusterRegistry.ClusterProfile profile = new ClusterRegistry.ClusterProfile(
+                    java.util.UUID.randomUUID().toString(), clusterName, rootDir.toAbsolutePath().toString(), bucket, ""
+            );
+            clusterRegistry.registerCluster(profile);
+            clusterRegistry.setActiveClusterId(profile.id);
+            clusterRegistry.save();
         } catch (IOException ignored) {}
     }
 
@@ -2382,12 +2399,14 @@ public class ClusterGUI extends JFrame {
                                 updateDownloadBtn.setText("Downloading...");
                                 workerPool.submit(() -> {
                                     try {
-                                        GitHubUpdateChecker.downloadUpdate(info.downloadUrl(), rootDir, pct ->
+                                        Path runningJar = ServerLauncher.getRunningJarPath();
+                                        Path updateFile = runningJar.resolveSibling("ServerLauncher.jar.update");
+                                        GitHubUpdateChecker.downloadUpdate(info.downloadUrl(), updateFile, pct ->
                                                 SwingUtilities.invokeLater(() -> updateDownloadBtn.setText("Downloading " + pct + "%"))
                                         );
                                         SwingUtilities.invokeLater(() -> {
                                             JOptionPane.showMessageDialog(this, "Update downloaded successfully!\nRelaunching...", "Update Ready", JOptionPane.INFORMATION_MESSAGE);
-                                            System.exit(100);
+                                            ServerLauncher.applyUpdateAndRelaunch(runningJar, updateFile);
                                         });
                                     } catch (Exception ex) {
                                         SwingUtilities.invokeLater(() -> {

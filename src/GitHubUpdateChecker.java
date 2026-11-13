@@ -90,11 +90,13 @@ public class GitHubUpdateChecker {
         return false;
     }
 
-    public static void downloadUpdate(String downloadUrl, Path rootDir, Consumer<Integer> progressConsumer) throws Exception {
+    public static void downloadUpdate(String downloadUrl, Path targetLocation, Consumer<Integer> progressConsumer) throws Exception {
         if (progressConsumer == null) progressConsumer = p -> {};
         if (downloadUrl == null) throw new IllegalArgumentException("Download URL is missing");
 
-        Path updateFile = rootDir.resolve("ServerLauncher.jar.update");
+        Path updateFile = Files.isDirectory(targetLocation)
+                ? targetLocation.resolve("ServerLauncher.jar.update")
+                : targetLocation;
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(downloadUrl))
                 .header("User-Agent", "MC-Cluster-Orchestrator")
