@@ -17,7 +17,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.2";
+    public static final String APP_VERSION = "2.1.3";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
