@@ -2,6 +2,7 @@ import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
 import java.awt.*;
+import java.awt.datatransfer.StringSelection;
 import java.awt.event.*;
 import java.awt.font.GlyphVector;
 import java.awt.geom.Rectangle2D;
@@ -60,6 +61,7 @@ public class ClusterGUI extends JFrame {
     private JPanel updateBanner;
     private JLabel updateBannerText;
     private ModernButton updateDownloadBtn;
+    private ModernCard unconfiguredBanner;
 
     // Admin Governance Components
     private JLabel adminClusterHeaderLabel;
@@ -73,6 +75,8 @@ public class ClusterGUI extends JFrame {
 
     // Settings Components
     private JTextField settingsStorageField;
+    private PlaceholderTextField settingsTokenField;
+    private JLabel settingsTokenFeedbackLbl;
     private JTextField settingsBucketField;
     private JTextField settingsKeyIdField;
     private JTextField settingsAppKeyField;
@@ -420,11 +424,48 @@ public class ClusterGUI extends JFrame {
         // Bottom: Update Notification Banner
         updateBanner = buildUpdateBannerPanel();
 
-        dashboard.add(subHeader, BorderLayout.NORTH);
+        // Top Section: Subheader + Unconfigured Warning Banner
+        unconfiguredBanner = buildUnconfiguredBannerPanel();
+        JPanel topContainer = new JPanel(new BorderLayout(0, 8));
+        topContainer.setOpaque(false);
+        topContainer.add(subHeader, BorderLayout.NORTH);
+        topContainer.add(unconfiguredBanner, BorderLayout.SOUTH);
+
+        dashboard.add(topContainer, BorderLayout.NORTH);
         dashboard.add(center, BorderLayout.CENTER);
         dashboard.add(updateBanner, BorderLayout.SOUTH);
 
+        updatePrimaryButtonState();
+
         return dashboard;
+    }
+
+    private ModernCard buildUnconfiguredBannerPanel() {
+        ModernCard banner = new ModernCard(8);
+        banner.setCustomColors(new Color(38, 28, 14), new Color(180, 115, 20));
+        banner.setLayout(new BorderLayout(14, 0));
+        banner.setBorder(new EmptyBorder(8, 14, 8, 14));
+
+        JLabel iconLbl = new JLabel("⚠️");
+        iconLbl.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 16));
+
+        JLabel textLbl = new JLabel("<html><b>Cluster Credentials Required:</b> Paste your invite token to link cloud synchronization and unlock server hosting.</html>");
+        textLbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        textLbl.setForeground(COLOR_AMBER);
+
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        left.setOpaque(false);
+        left.add(iconLbl);
+        left.add(textLbl);
+
+        ModernButton enterKeyBtn = new ModernButton("🔑  Enter Invite Key", COLOR_AMBER, Color.WHITE, 11, 6);
+        enterKeyBtn.setPreferredSize(new Dimension(160, 30));
+        enterKeyBtn.addActionListener(e -> showClusterTokenDialog());
+
+        banner.add(left, BorderLayout.CENTER);
+        banner.add(enterKeyBtn, BorderLayout.EAST);
+        banner.setVisible(!isConfigured());
+        return banner;
     }
 
     private JPanel buildMilestoneStepperCard() {
@@ -804,9 +845,15 @@ public class ClusterGUI extends JFrame {
             String bw = ServerLauncher.extractJsonString(json, "b2_bandwidth_limit");
             if (bw == null || bw.isEmpty()) bw = "10M";
 
-            ClusterToken.ClusterConfig config = new ClusterToken.ClusterConfig(bucket, keyId, appKey, stale, bw, null, null);
+            String domain = ServerLauncher.extractJsonString(json, "domain");
+            String tokenVal = ServerLauncher.extractJsonString(json, "token");
+
+            ClusterToken.ClusterConfig config = new ClusterToken.ClusterConfig(bucket, keyId, appKey, stale, bw, domain, tokenVal);
             String token = ClusterToken.encode(config);
             adminInviteKeyField.setText(token);
+            if (settingsTokenField != null) {
+                settingsTokenField.setText(token);
+            }
         } catch (Exception ignored) {}
     }
 
@@ -862,16 +909,71 @@ public class ClusterGUI extends JFrame {
         pathRow.add(settingsStorageField, BorderLayout.CENTER);
         pathRow.add(browseBtn, BorderLayout.EAST);
 
-        // Row 2: Bucket Name
+        // Row 2: Master Cluster Invite Key (One-String Authentication)
+        JPanel tokenRow = new JPanel(new BorderLayout(8, 0));
+        tokenRow.setOpaque(false);
+        tokenRow.setPreferredSize(new Dimension(0, 36));
+        tokenRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
+
+        settingsTokenField = new PlaceholderTextField("", "mc-cluster://...");
+        settingsTokenField.setFont(new Font("Consolas", Font.PLAIN, 12));
+        settingsTokenField.setPreferredSize(new Dimension(0, 36));
+
+        ModernButton copyTokenBtn = new ModernButton("📋 Copy", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
+        copyTokenBtn.setPreferredSize(new Dimension(85, 36));
+        copyTokenBtn.addActionListener(e -> {
+            String val = settingsTokenField.getText().trim();
+            if (!val.isEmpty()) {
+                Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(val), null);
+                copyTokenBtn.setText("✔ Copied!");
+                Timer t = new Timer(1500, ev -> copyTokenBtn.setText("📋 Copy"));
+                t.setRepeats(false);
+                t.start();
+            }
+        });
+
+        tokenRow.add(settingsTokenField, BorderLayout.CENTER);
+        tokenRow.add(copyTokenBtn, BorderLayout.EAST);
+
+        settingsTokenFeedbackLbl = new JLabel("Paste an mc-cluster:// invite token to instantly configure cluster credentials");
+        settingsTokenFeedbackLbl.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        settingsTokenFeedbackLbl.setForeground(COLOR_TEXT_MUTED);
+
+        settingsTokenField.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyReleased(KeyEvent e) {
+                String raw = settingsTokenField.getText().trim();
+                if (raw.startsWith(ClusterToken.PREFIX)) {
+                    ClusterToken.ClusterConfig cfg = ClusterToken.decode(raw);
+                    if (cfg != null && cfg.bucket() != null && !cfg.bucket().isEmpty()) {
+                        settingsBucketField.setText(cfg.bucket());
+                        settingsKeyIdField.setText(cfg.keyId());
+                        settingsAppKeyField.setText(cfg.appKey());
+                        if (cfg.bandwidthLimit() != null && !cfg.bandwidthLimit().isEmpty()) {
+                            settingsBwLimitField.setText(cfg.bandwidthLimit());
+                        }
+                        settingsTokenFeedbackLbl.setText("✔ Valid token decoded! Connected to bucket: " + cfg.bucket());
+                        settingsTokenFeedbackLbl.setForeground(COLOR_EMERALD);
+                        return;
+                    }
+                }
+                if (raw.isEmpty()) {
+                    settingsTokenFeedbackLbl.setText("Paste an mc-cluster:// invite token to instantly configure cluster credentials");
+                    settingsTokenFeedbackLbl.setForeground(COLOR_TEXT_MUTED);
+                } else {
+                    settingsTokenFeedbackLbl.setText("✖ Invalid mc-cluster:// token format");
+                    settingsTokenFeedbackLbl.setForeground(COLOR_ROSE);
+                }
+            }
+        });
+
+        // Advanced Manual B2 Credentials Panel
         settingsBucketField = createDarkTextField("e.g. my-minecraft-cluster");
-        // Row 3: Key ID
         settingsKeyIdField = createDarkTextField("e.g. 004a1b2c3d4e5f00000000001");
-        // Row 4: Application Key
         settingsAppKeyField = createDarkTextField("e.g. K004xxxxxxxxxxxxxxxxxxxxxxxxx");
-        // Row 5: Bandwidth Cap
         settingsBwLimitField = createDarkTextField("e.g. 10M (optional)");
 
-        // Row 6: Heartbeat and Autosave spinners
+        // Heartbeat and Autosave spinners
         JPanel timingRow = new JPanel(new GridLayout(1, 2, 20, 0));
         timingRow.setOpaque(false);
         timingRow.setPreferredSize(new Dimension(0, 36));
@@ -900,17 +1002,52 @@ public class ClusterGUI extends JFrame {
         timingRow.add(hbBlock);
         timingRow.add(asBlock);
 
+        JPanel advancedPanel = new JPanel();
+        advancedPanel.setLayout(new BoxLayout(advancedPanel, BoxLayout.Y_AXIS));
+        advancedPanel.setOpaque(false);
+        advancedPanel.setVisible(false);
+
+        advancedPanel.add(Box.createVerticalStrut(10));
+        advancedPanel.add(createLabeledRow("Backblaze Bucket:", settingsBucketField));
+        advancedPanel.add(Box.createVerticalStrut(10));
+        advancedPanel.add(createLabeledRow("Application Key ID:", settingsKeyIdField));
+        advancedPanel.add(Box.createVerticalStrut(10));
+        advancedPanel.add(createLabeledRow("Application Key Secret:", settingsAppKeyField));
+        advancedPanel.add(Box.createVerticalStrut(10));
+        advancedPanel.add(createLabeledRow("Upload Bandwidth Limit:", settingsBwLimitField));
+        advancedPanel.add(Box.createVerticalStrut(10));
+        advancedPanel.add(timingRow);
+
+        JButton toggleAdvancedBtn = new JButton("▶  Advanced Configuration (Manual B2 Credentials)");
+        toggleAdvancedBtn.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        toggleAdvancedBtn.setForeground(COLOR_TEXT_MUTED);
+        toggleAdvancedBtn.setContentAreaFilled(false);
+        toggleAdvancedBtn.setBorderPainted(false);
+        toggleAdvancedBtn.setFocusPainted(false);
+        toggleAdvancedBtn.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        toggleAdvancedBtn.setHorizontalAlignment(SwingConstants.LEFT);
+        toggleAdvancedBtn.addActionListener(e -> {
+            boolean vis = !advancedPanel.isVisible();
+            advancedPanel.setVisible(vis);
+            toggleAdvancedBtn.setText(vis ? "▼  Advanced Configuration (Manual B2 Credentials)" : "▶  Advanced Configuration (Manual B2 Credentials)");
+            formCard.revalidate();
+            formCard.repaint();
+        });
+
         formCard.add(pathRow);
-        formCard.add(Box.createVerticalStrut(12));
-        formCard.add(createLabeledRow("Backblaze Bucket:", settingsBucketField));
-        formCard.add(Box.createVerticalStrut(12));
-        formCard.add(createLabeledRow("Application Key ID:", settingsKeyIdField));
-        formCard.add(Box.createVerticalStrut(12));
-        formCard.add(createLabeledRow("Application Key Secret:", settingsAppKeyField));
-        formCard.add(Box.createVerticalStrut(12));
-        formCard.add(createLabeledRow("Upload Bandwidth Limit:", settingsBwLimitField));
-        formCard.add(Box.createVerticalStrut(12));
-        formCard.add(timingRow);
+        formCard.add(Box.createVerticalStrut(14));
+        formCard.add(createLabeledRow("Cluster Invite Key:", tokenRow));
+        formCard.add(Box.createVerticalStrut(4));
+
+        JPanel feedbackRow = new JPanel(new BorderLayout(10, 0));
+        feedbackRow.setOpaque(false);
+        feedbackRow.add(Box.createHorizontalStrut(190), BorderLayout.WEST);
+        feedbackRow.add(settingsTokenFeedbackLbl, BorderLayout.CENTER);
+        formCard.add(feedbackRow);
+
+        formCard.add(Box.createVerticalStrut(16));
+        formCard.add(toggleAdvancedBtn);
+        formCard.add(advancedPanel);
 
         // Populate initial values
         loadSettingsIntoFields();
@@ -971,13 +1108,44 @@ public class ClusterGUI extends JFrame {
 
             settingsHeartbeatSpinner.setValue(ServerLauncher.extractJsonInt(json, "heartbeat_seconds", 120));
             settingsAutosaveSpinner.setValue(ServerLauncher.extractJsonInt(json, "save_interval_minutes", 15));
+
+            if (bucket != null && keyId != null && appKey != null && !bucket.isEmpty() && !keyId.isEmpty() && !appKey.isEmpty()) {
+                String domain = ServerLauncher.extractJsonString(json, "domain");
+                String tokenVal = ServerLauncher.extractJsonString(json, "token");
+                int stale = ServerLauncher.extractJsonInt(json, "stale_timeout_minutes", 10);
+                ClusterToken.ClusterConfig config = new ClusterToken.ClusterConfig(bucket, keyId, appKey, stale, bw, domain, tokenVal);
+                String tokenStr = ClusterToken.encode(config);
+                if (settingsTokenField != null) {
+                    settingsTokenField.setText(tokenStr);
+                }
+                if (settingsTokenFeedbackLbl != null) {
+                    settingsTokenFeedbackLbl.setText("✔ Active cluster token generated from configuration");
+                    settingsTokenFeedbackLbl.setForeground(COLOR_EMERALD);
+                }
+            }
         } catch (Exception ignored) {}
     }
 
     private void saveSettingsFromFields() {
         try {
             Path cfg = rootDir.resolve("config.json");
+            String domain = "";
+            String token = "";
+            String serverJar = "bin/core.dat";
+            String sAddr = "";
+            if (Files.exists(cfg)) {
+                String oldJson = Files.readString(cfg);
+                domain = ServerLauncher.extractJsonString(oldJson, "domain");
+                token = ServerLauncher.extractJsonString(oldJson, "token");
+                serverJar = ServerLauncher.extractJsonString(oldJson, "server_jar");
+                if (serverJar == null || serverJar.isEmpty()) serverJar = "bin/core.dat";
+                sAddr = ServerLauncher.extractJsonString(oldJson, "server_address");
+            }
             StringBuilder sb = new StringBuilder("{\n");
+            sb.append("  \"server_jar\": \"").append(serverJar).append("\",\n");
+            if (sAddr != null && !sAddr.isEmpty()) {
+                sb.append("  \"server_address\": \"").append(sAddr).append("\",\n");
+            }
             sb.append("  \"b2_bucket\": \"").append(settingsBucketField.getText().trim()).append("\",\n");
             sb.append("  \"b2_key_id\": \"").append(settingsKeyIdField.getText().trim()).append("\",\n");
             sb.append("  \"b2_application_key\": \"").append(settingsAppKeyField.getText().trim()).append("\",\n");
@@ -985,9 +1153,19 @@ public class ClusterGUI extends JFrame {
             sb.append("  \"stale_timeout_minutes\": 10,\n");
             sb.append("  \"b2_bandwidth_limit\": \"").append(settingsBwLimitField.getText().trim()).append("\",\n");
             sb.append("  \"heartbeat_seconds\": ").append(settingsHeartbeatSpinner.getValue()).append(",\n");
-            sb.append("  \"save_interval_minutes\": ").append(settingsAutosaveSpinner.getValue()).append("\n");
-            sb.append("}\n");
+            sb.append("  \"save_interval_minutes\": ").append(settingsAutosaveSpinner.getValue());
+            if (domain != null && !domain.isEmpty()) {
+                sb.append(",\n  \"domain\": \"").append(domain).append("\"");
+            }
+            if (token != null && !token.isEmpty()) {
+                sb.append(",\n  \"token\": \"").append(token).append("\"");
+            }
+            sb.append("\n}\n");
             Files.writeString(cfg, sb.toString());
+            generateAndDisplayInviteToken();
+            loadSettingsIntoFields();
+            updatePrimaryButtonState();
+            refreshCloudLockStatus();
             JOptionPane.showMessageDialog(this, "Configuration successfully saved!", "Settings Saved", JOptionPane.INFORMATION_MESSAGE);
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "Failed to save settings: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
@@ -1290,14 +1468,18 @@ public class ClusterGUI extends JFrame {
         title.setForeground(COLOR_TEXT_PRIMARY);
 
         ModernCard formCard = new ModernCard();
-        formCard.setLayout(new GridLayout(6, 1, 0, 10));
+        formCard.setLayout(new BoxLayout(formCard, BoxLayout.Y_AXIS));
         formCard.setBorder(new EmptyBorder(16, 20, 16, 20));
 
         // Storage path picker
         JPanel pathRow = new JPanel(new BorderLayout(8, 0));
         pathRow.setOpaque(false);
+        pathRow.setPreferredSize(new Dimension(0, 36));
+        pathRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
+
         JTextField pathField = createDarkTextFieldWithText(rootDir.toString());
         ModernButton browseBtn = new ModernButton("Browse...", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
+        browseBtn.setPreferredSize(new Dimension(90, 36));
         browseBtn.addActionListener(e -> {
             JFileChooser chooser = new JFileChooser(rootDir.toFile());
             chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
@@ -1305,17 +1487,59 @@ public class ClusterGUI extends JFrame {
                 pathField.setText(chooser.getSelectedFile().getAbsolutePath());
             }
         });
-        pathRow.add(new JLabel("Storage Directory: ") {{ setForeground(COLOR_TEXT_MUTED); }}, BorderLayout.WEST);
+        JLabel pathLbl = new JLabel("Storage Directory: ");
+        pathLbl.setPreferredSize(new Dimension(160, 36));
+        pathLbl.setForeground(COLOR_TEXT_MUTED);
+        pathRow.add(pathLbl, BorderLayout.WEST);
         pathRow.add(pathField, BorderLayout.CENTER);
         pathRow.add(browseBtn, BorderLayout.EAST);
 
         // Invite Token Field
-        JTextField tokenField = createDarkTextField("Paste your mc-cluster:// invite token here...");
+        PlaceholderTextField tokenField = new PlaceholderTextField("", "Paste your mc-cluster:// invite token here...");
+        tokenField.setFont(new Font("Consolas", Font.PLAIN, 12));
+        tokenField.setPreferredSize(new Dimension(0, 36));
+
+        JLabel joinFeedbackLbl = new JLabel("Paste your mc-cluster:// invite token provided by the admin");
+        joinFeedbackLbl.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        joinFeedbackLbl.setForeground(COLOR_TEXT_MUTED);
 
         JTextField bucketField = createDarkTextField("B2 Bucket Name");
         JTextField keyIdField = createDarkTextField("B2 Application Key ID");
         JTextField appKeyField = createDarkTextField("B2 Application Key Secret");
         JTextField hostField = createDarkTextFieldWithText(ServerLauncher.getHostName());
+
+        JPanel advancedPanel = new JPanel();
+        advancedPanel.setLayout(new BoxLayout(advancedPanel, BoxLayout.Y_AXIS));
+        advancedPanel.setOpaque(false);
+        advancedPanel.setVisible(false);
+
+        advancedPanel.add(Box.createVerticalStrut(10));
+        advancedPanel.add(createLabeledRow("B2 Bucket Name:", bucketField));
+        advancedPanel.add(Box.createVerticalStrut(10));
+        advancedPanel.add(createLabeledRow("Key ID:", keyIdField));
+        advancedPanel.add(Box.createVerticalStrut(10));
+        advancedPanel.add(createLabeledRow("Application Secret:", appKeyField));
+        advancedPanel.add(Box.createVerticalStrut(10));
+        advancedPanel.add(createLabeledRow("My Host Nickname:", hostField));
+
+        JButton toggleAdvancedBtn = new JButton("▶  Advanced Configuration (Manual B2 Credentials)");
+        toggleAdvancedBtn.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        toggleAdvancedBtn.setForeground(COLOR_TEXT_MUTED);
+        toggleAdvancedBtn.setContentAreaFilled(false);
+        toggleAdvancedBtn.setBorderPainted(false);
+        toggleAdvancedBtn.setFocusPainted(false);
+        toggleAdvancedBtn.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        toggleAdvancedBtn.setHorizontalAlignment(SwingConstants.LEFT);
+        toggleAdvancedBtn.addActionListener(e -> {
+            boolean vis = !advancedPanel.isVisible();
+            advancedPanel.setVisible(vis);
+            toggleAdvancedBtn.setText(vis ? "▼  Advanced Configuration (Manual B2 Credentials)" : "▶  Advanced Configuration (Manual B2 Credentials)");
+            formCard.revalidate();
+            formCard.repaint();
+        });
+
+        ModernButton connectBtn = new ModernButton("Connect & Save", COLOR_BLUE, Color.WHITE, 13, 8);
+        connectBtn.setPreferredSize(new Dimension(180, 40));
 
         tokenField.addKeyListener(new KeyAdapter() {
             @Override
@@ -1323,22 +1547,43 @@ public class ClusterGUI extends JFrame {
                 String raw = tokenField.getText().trim();
                 if (raw.startsWith(ClusterToken.PREFIX)) {
                     ClusterToken.ClusterConfig cfg = ClusterToken.decode(raw);
-                    if (cfg != null) {
+                    if (cfg != null && cfg.bucket() != null && !cfg.bucket().isEmpty()) {
                         bucketField.setText(cfg.bucket());
                         keyIdField.setText(cfg.keyId());
                         appKeyField.setText(cfg.appKey());
                         tokenField.setForeground(COLOR_EMERALD);
+                        joinFeedbackLbl.setText("✔ Valid token decoded! Connected to bucket: " + cfg.bucket());
+                        joinFeedbackLbl.setForeground(COLOR_EMERALD);
+                        connectBtn.setEnabled(true);
+                        connectBtn.setBackgroundColor(COLOR_EMERALD);
+                        connectBtn.setText("Connect & Join Cluster");
+                        return;
                     }
+                }
+                if (raw.isEmpty()) {
+                    joinFeedbackLbl.setText("Paste your mc-cluster:// invite token provided by the admin");
+                    joinFeedbackLbl.setForeground(COLOR_TEXT_MUTED);
+                } else {
+                    joinFeedbackLbl.setText("✖ Invalid mc-cluster:// token format");
+                    joinFeedbackLbl.setForeground(COLOR_ROSE);
                 }
             }
         });
 
         formCard.add(pathRow);
+        formCard.add(Box.createVerticalStrut(14));
         formCard.add(createLabeledRow("Cluster Invite Key:", tokenField));
-        formCard.add(createLabeledRow("B2 Bucket Name:", bucketField));
-        formCard.add(createLabeledRow("Key ID:", keyIdField));
-        formCard.add(createLabeledRow("Application Secret:", appKeyField));
-        formCard.add(createLabeledRow("My Host Nickname:", hostField));
+        formCard.add(Box.createVerticalStrut(4));
+
+        JPanel feedbackRow = new JPanel(new BorderLayout(10, 0));
+        feedbackRow.setOpaque(false);
+        feedbackRow.add(Box.createHorizontalStrut(190), BorderLayout.WEST);
+        feedbackRow.add(joinFeedbackLbl, BorderLayout.CENTER);
+        formCard.add(feedbackRow);
+
+        formCard.add(Box.createVerticalStrut(16));
+        formCard.add(toggleAdvancedBtn);
+        formCard.add(advancedPanel);
 
         JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         footer.setOpaque(false);
@@ -1346,8 +1591,6 @@ public class ClusterGUI extends JFrame {
         ModernButton backBtn = new ModernButton("Back", COLOR_BG_CARD, COLOR_TEXT_MUTED, 12, 6);
         backBtn.addActionListener(e -> wizardCards.show(wizardContainer, "WIZARD_CHOICE"));
 
-        ModernButton connectBtn = new ModernButton("Connect & Save", COLOR_BLUE, Color.WHITE, 13, 8);
-        connectBtn.setPreferredSize(new Dimension(160, 40));
         connectBtn.addActionListener(e -> {
             String bucket = bucketField.getText().trim();
             String keyId = keyIdField.getText().trim();
@@ -1359,8 +1602,14 @@ public class ClusterGUI extends JFrame {
                 return;
             }
 
+            Path chosenPath = Paths.get(pathField.getText().trim());
+            if (!chosenPath.equals(rootDir)) {
+                this.rootDir = chosenPath;
+            }
+
             saveInitialConfig(bucket, keyId, appKey, host, "6G");
             masterLayout.show(masterContainer, "VIEW_MAIN_APP");
+            updatePrimaryButtonState();
             refreshCloudLockStatus();
         });
 
@@ -1395,10 +1644,32 @@ public class ClusterGUI extends JFrame {
     // =========================================================================
     private void toggleServerAction() {
         if (!isServerRunning) {
+            if (!isConfigured()) {
+                showClusterTokenDialog();
+                return;
+            }
             launchServerSession();
         } else {
             terminateServerSession();
         }
+    }
+
+    private void updatePrimaryButtonState() {
+        SwingUtilities.invokeLater(() -> {
+            if (isServerRunning || primaryActionBtn == null) return;
+            boolean configured = isConfigured();
+            if (!configured) {
+                primaryActionBtn.setText("🔑  ENTER CLUSTER TOKEN");
+                primaryActionBtn.setBackgroundColor(COLOR_AMBER);
+                primaryActionBtn.setEnabled(true);
+                if (unconfiguredBanner != null) unconfiguredBanner.setVisible(true);
+            } else {
+                primaryActionBtn.setText("▶  START CLUSTER SERVER");
+                primaryActionBtn.setBackgroundColor(COLOR_EMERALD);
+                primaryActionBtn.setEnabled(true);
+                if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
+            }
+        });
     }
 
     private void launchServerSession() {
@@ -1693,9 +1964,7 @@ public class ClusterGUI extends JFrame {
         isServerRunning = false;
         SwingUtilities.invokeLater(() -> {
             if (clusterSelector != null) clusterSelector.setEnabled(true);
-            primaryActionBtn.setText("▶  START CLUSTER SERVER");
-            primaryActionBtn.setBackgroundColor(COLOR_EMERALD);
-            primaryActionBtn.setEnabled(true);
+            updatePrimaryButtonState();
             resetMilestones();
             refreshCloudLockStatus();
             appendConsoleLog("[SUCCESS] Server stopped cleanly. Progress preserved in cloud.");
@@ -1733,9 +2002,7 @@ public class ClusterGUI extends JFrame {
         });
         SwingUtilities.invokeLater(() -> {
             if (clusterSelector != null) clusterSelector.setEnabled(true);
-            primaryActionBtn.setText("▶  START CLUSTER SERVER");
-            primaryActionBtn.setBackgroundColor(COLOR_EMERALD);
-            primaryActionBtn.setEnabled(true);
+            updatePrimaryButtonState();
             resetMilestones();
             refreshCloudLockStatus();
             JOptionPane.showMessageDialog(this, "Could not start server:\n" + reason, "Launch Aborted", JOptionPane.WARNING_MESSAGE);
@@ -1786,8 +2053,18 @@ public class ClusterGUI extends JFrame {
     // Utility & Cloud Actions
     // =========================================================================
     private void refreshCloudLockStatus() {
+        if (!isConfigured()) {
+            SwingUtilities.invokeLater(() -> {
+                statusBadge.setText("● Credentials Required");
+                statusBadge.setForeground(COLOR_AMBER);
+                updatePrimaryButtonState();
+            });
+            return;
+        }
+
         statusBadge.setText("● Polling Cloud...");
         statusBadge.setForeground(COLOR_TEXT_MUTED);
+        updatePrimaryButtonState();
 
         workerPool.submit(() -> {
             try {
@@ -2284,6 +2561,7 @@ public class ClusterGUI extends JFrame {
                     loadSettingsIntoFields();
                     refreshCloudLockStatus();
                     resetMilestones();
+                    updatePrimaryButtonState();
                 } else {
                     JOptionPane.showMessageDialog(this,
                             "Directory for cluster '" + profile.name + "' not found at:\n" + profile.path,
@@ -2454,11 +2732,17 @@ public class ClusterGUI extends JFrame {
                         refreshCloudLockStatus();
                         resetMilestones();
                         masterLayout.show(masterContainer, "VIEW_MAIN_APP");
-                        JOptionPane.showMessageDialog(this,
-                                "Cluster '" + finalClusterName + "' successfully imported!\n" +
-                                "Workspace: " + targetDir.toString() + "\n\n" +
-                                "All world files, plugins, and configurations are ready with 0 MB cloud egress spent.",
-                                "Import Complete", JOptionPane.INFORMATION_MESSAGE);
+                        updatePrimaryButtonState();
+
+                        if (!isConfigured()) {
+                            showClusterTokenDialog();
+                        } else {
+                            JOptionPane.showMessageDialog(this,
+                                    "Cluster '" + finalClusterName + "' successfully imported!\n" +
+                                    "Workspace: " + targetDir.toString() + "\n\n" +
+                                    "All world files, plugins, and configurations are ready with 0 MB cloud egress spent.",
+                                    "Import Complete", JOptionPane.INFORMATION_MESSAGE);
+                        }
                     });
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
@@ -2470,6 +2754,143 @@ public class ClusterGUI extends JFrame {
                 }
             });
         }
+    }
+
+    public void showClusterTokenDialog() {
+        JDialog dialog = new JDialog(this, "Connect Cluster (Invite Token)", true);
+        dialog.setSize(540, 310);
+        dialog.setLocationRelativeTo(this);
+        dialog.getContentPane().setBackground(COLOR_BG_DARK);
+        dialog.setLayout(new BorderLayout(0, 16));
+        ((JPanel) dialog.getContentPane()).setBorder(new EmptyBorder(20, 24, 20, 24));
+
+        JLabel titleLbl = new JLabel("🔑  ENTER CLUSTER INVITE TOKEN");
+        titleLbl.setFont(new Font("Segoe UI", Font.BOLD, 15));
+        titleLbl.setForeground(COLOR_AMBER);
+
+        JLabel descLbl = new JLabel("<html>Paste the <code>mc-cluster://...</code> invite token provided by your cluster administrator to connect your cloud synchronization and join the shared world.</html>");
+        descLbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        descLbl.setForeground(COLOR_TEXT_MUTED);
+
+        JPanel headerPanel = new JPanel(new GridLayout(2, 1, 0, 6));
+        headerPanel.setOpaque(false);
+        headerPanel.add(titleLbl);
+        headerPanel.add(descLbl);
+
+        JPanel formPanel = new JPanel(new BorderLayout(0, 8));
+        formPanel.setOpaque(false);
+
+        PlaceholderTextField tokenInput = new PlaceholderTextField("", "Paste mc-cluster://... token here");
+        tokenInput.setFont(new Font("Segoe UI", Font.PLAIN, 13));
+        tokenInput.setPreferredSize(new Dimension(0, 38));
+
+        JLabel feedbackLbl = new JLabel("Waiting for valid invite token...");
+        feedbackLbl.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        feedbackLbl.setForeground(COLOR_TEXT_MUTED);
+
+        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+        btnPanel.setOpaque(false);
+
+        ModernButton skipBtn = new ModernButton("Skip / Later", COLOR_BG_CARD, COLOR_TEXT_MUTED, 11, 6);
+        ModernButton connectBtn = new ModernButton("Connect & Finish", COLOR_AMBER, Color.WHITE, 12, 8);
+        connectBtn.setEnabled(false);
+
+        final ClusterToken.ClusterConfig[] parsedHolder = new ClusterToken.ClusterConfig[1];
+
+        tokenInput.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyReleased(KeyEvent e) {
+                String raw = tokenInput.getText().trim();
+                if (raw.startsWith(ClusterToken.PREFIX)) {
+                    ClusterToken.ClusterConfig cfg = ClusterToken.decode(raw);
+                    if (cfg != null && cfg.bucket() != null && !cfg.bucket().isEmpty()) {
+                        parsedHolder[0] = cfg;
+                        feedbackLbl.setText("✔ Valid token for cluster bucket: " + cfg.bucket());
+                        feedbackLbl.setForeground(COLOR_EMERALD);
+                        connectBtn.setEnabled(true);
+                        connectBtn.setBackgroundColor(COLOR_EMERALD);
+                        return;
+                    }
+                }
+                parsedHolder[0] = null;
+                feedbackLbl.setText(raw.isEmpty() ? "Waiting for valid invite token..." : "✖ Invalid mc-cluster:// token format");
+                feedbackLbl.setForeground(raw.isEmpty() ? COLOR_TEXT_MUTED : COLOR_ROSE);
+                connectBtn.setEnabled(false);
+                connectBtn.setBackgroundColor(COLOR_AMBER);
+            }
+        });
+
+        connectBtn.addActionListener(e -> {
+            ClusterToken.ClusterConfig cfg = parsedHolder[0];
+            if (cfg != null) {
+                saveConfigFromToken(cfg);
+                dialog.dispose();
+                onConfiguredSuccess(cfg);
+            }
+        });
+
+        skipBtn.addActionListener(e -> dialog.dispose());
+
+        btnPanel.add(skipBtn);
+        btnPanel.add(connectBtn);
+
+        formPanel.add(tokenInput, BorderLayout.NORTH);
+        formPanel.add(feedbackLbl, BorderLayout.CENTER);
+
+        dialog.add(headerPanel, BorderLayout.NORTH);
+        dialog.add(formPanel, BorderLayout.CENTER);
+        dialog.add(btnPanel, BorderLayout.SOUTH);
+
+        dialog.setVisible(true);
+    }
+
+    private void saveConfigFromToken(ClusterToken.ClusterConfig cfg) {
+        Path cfgPath = rootDir.resolve("config.json");
+        StringBuilder sb = new StringBuilder("{\n");
+        sb.append("  \"server_jar\": \"bin/core.dat\",\n");
+        sb.append("  \"b2_bucket\": \"").append(cfg.bucket()).append("\",\n");
+        sb.append("  \"b2_key_id\": \"").append(cfg.keyId()).append("\",\n");
+        sb.append("  \"b2_application_key\": \"").append(cfg.appKey()).append("\",\n");
+        sb.append("  \"java_memory\": \"").append(ramSlider != null ? ramSlider.getValue() + "G" : "6G").append("\",\n");
+        sb.append("  \"stale_timeout_minutes\": ").append(cfg.staleMinutes() > 0 ? cfg.staleMinutes() : 10).append(",\n");
+        sb.append("  \"b2_bandwidth_limit\": \"").append(cfg.bandwidthLimit() != null && !cfg.bandwidthLimit().isEmpty() ? cfg.bandwidthLimit() : "10M").append("\",\n");
+        sb.append("  \"heartbeat_seconds\": 120,\n");
+        sb.append("  \"save_interval_minutes\": 15");
+        if (cfg.domain() != null && !cfg.domain().isEmpty()) {
+            sb.append(",\n  \"domain\": \"").append(cfg.domain()).append("\"");
+        }
+        if (cfg.token() != null && !cfg.token().isEmpty()) {
+            sb.append(",\n  \"token\": \"").append(cfg.token()).append("\"");
+        }
+        sb.append("\n}\n");
+        try {
+            Files.writeString(cfgPath, sb.toString());
+            appendConsoleLog("[Config] Written new cluster configuration for bucket: " + cfg.bucket());
+        } catch (IOException ex) {
+            appendConsoleLog("[ERROR] Failed to save config.json: " + ex.getMessage());
+        }
+    }
+
+    private void onConfiguredSuccess(ClusterToken.ClusterConfig cfg) {
+        ClusterRegistry.ClusterProfile active = clusterRegistry.getActiveCluster();
+        if (active != null) {
+            active.bucket = cfg.bucket();
+            active.name = cfg.bucket().replace("-", " ");
+            if (cfg.domain() != null && !cfg.domain().isEmpty()) {
+                active.serverAddress = cfg.domain() + ".duckdns.org";
+            }
+            clusterRegistry.registerCluster(active);
+        }
+        refreshClusterSelectorItems();
+        updatePrimaryButtonState();
+        refreshCloudLockStatus();
+        loadSettingsIntoFields();
+        appendConsoleLog("[Config] Cluster credentials successfully linked. Egress & collision guards active.");
+        JOptionPane.showMessageDialog(this,
+                "Cluster credentials successfully configured!\n\n" +
+                "Bucket: " + cfg.bucket() + "\n" +
+                "Cloud synchronization and anti-collision guards are now active.",
+                "Cluster Configured", JOptionPane.INFORMATION_MESSAGE);
     }
 
     public static void launch(Path rootDir) {
@@ -2548,6 +2969,8 @@ public class ClusterGUI extends JFrame {
 
     public static class ModernCard extends JPanel {
         private final int radius;
+        private Color customBg = null;
+        private Color customBorder = null;
 
         public ModernCard() {
             this(12);
@@ -2558,13 +2981,19 @@ public class ClusterGUI extends JFrame {
             setOpaque(false);
         }
 
+        public void setCustomColors(Color bg, Color border) {
+            this.customBg = bg;
+            this.customBorder = border;
+            repaint();
+        }
+
         @Override
         protected void paintComponent(Graphics g) {
             Graphics2D g2 = (Graphics2D) g.create();
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2.setColor(COLOR_BG_CARD);
+            g2.setColor(customBg != null ? customBg : COLOR_BG_CARD);
             g2.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, radius, radius);
-            g2.setColor(COLOR_BORDER);
+            g2.setColor(customBorder != null ? customBorder : COLOR_BORDER);
             g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, radius, radius);
             g2.dispose();
             super.paintComponent(g);

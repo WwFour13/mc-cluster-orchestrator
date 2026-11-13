@@ -28,6 +28,10 @@
 - *.command
 - *.ps1
 - *.jar
+- *.zip
+- *.class
+- *.exe
+- *.lnk
 - /tools/**
 - /windows/**
 - /mac-linux/**

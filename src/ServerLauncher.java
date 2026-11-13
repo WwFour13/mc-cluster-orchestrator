@@ -1,4 +1,5 @@
 import java.awt.GraphicsEnvironment;
+import javax.swing.*;
 import java.io.*;
 import java.net.*;
 import java.net.http.*;
@@ -602,7 +603,16 @@ public class ServerLauncher {
 
         // Pre-Flight Egress Guard Calculation
         double estMb = estimateEgressMb(rootDir, rclone, b2Target);
-        if (estMb > 600.0 || (estMb > 0 && isWorldEmpty(rootDir))) {
+        if (estMb > 0 && isWorldEmpty(rootDir)) {
+            System.err.println("\n========================================================");
+            System.err.printf("[EGRESS GUARD] Initial cloud download of %.1f MB blocked to preserve cluster daily quota.%n", estMb);
+            System.err.println("  Downloading full world from scratch risks locking out the entire cluster for 24 hours.");
+            System.err.println("  Tip: Ask the active host for a 'cohost-files-YYYY-MM-DD.zip' to onboard with zero cloud egress.");
+            System.err.println("========================================================\n");
+            return false;
+        }
+
+        if (estMb > 800.0) {
             System.err.println("\n========================================================");
             System.err.printf("[EGRESS GUARD] Cloud download of %.1f MB blocked to preserve cluster daily quota.%n", estMb);
             System.err.println("  Downloading this volume risks locking out the entire cluster for 24 hours.");
@@ -611,6 +621,23 @@ public class ServerLauncher {
             return false;
         } else if (estMb >= 350.0) {
             System.out.printf("[B2 Sync Advisory] Notice: Inbound sync will download %.1f MB (~%.0f%% of daily quota).%n", estMb, (estMb / 1000.0) * 100);
+            if (!GraphicsEnvironment.isHeadless()) {
+                final boolean[] userApproved = new boolean[]{true};
+                try {
+                    SwingUtilities.invokeAndWait(() -> {
+                        int choice = JOptionPane.showConfirmDialog(null,
+                                String.format("Inbound cloud synchronization requires downloading %.1f MB\n" +
+                                        "(~%.0f%% of cluster daily free bandwidth quota).\n\n" +
+                                        "Do you wish to proceed with cloud synchronization?", estMb, (estMb / 1000.0) * 100),
+                                "B2 Bandwidth Advisory", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                        userApproved[0] = (choice == JOptionPane.YES_OPTION);
+                    });
+                } catch (Exception ignored) {}
+                if (!userApproved[0]) {
+                    System.err.println("[B2 Sync] Download cancelled by user.");
+                    return false;
+                }
+            }
         }
 
         boolean forceChecksum = (cloudGen > localGen);
