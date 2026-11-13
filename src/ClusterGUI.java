@@ -865,9 +865,9 @@ public class ClusterGUI extends JFrame {
         // Row 2: Bucket Name
         settingsBucketField = createDarkTextField("e.g. my-minecraft-cluster");
         // Row 3: Key ID
-        settingsKeyIdField = createDarkTextField("e.g. 0046c0c9ef987000000000001");
+        settingsKeyIdField = createDarkTextField("e.g. 004a1b2c3d4e5f00000000001");
         // Row 4: Application Key
-        settingsAppKeyField = createDarkTextField("e.g. K004XKwcFTHgMQFL64OGZixY0MniwLI");
+        settingsAppKeyField = createDarkTextField("e.g. K004xxxxxxxxxxxxxxxxxxxxxxxxx");
         // Row 5: Bandwidth Cap
         settingsBwLimitField = createDarkTextField("e.g. 10M (optional)");
 
