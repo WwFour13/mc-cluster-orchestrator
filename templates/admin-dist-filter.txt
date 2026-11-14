@@ -21,9 +21,9 @@
 - /libraries/**
 - /versions/**
 - *.update
+- /ServerLauncher.jar
 
 # Include runtime executables, scripts, plugins, and configs
-+ /ServerLauncher.jar
 + /LAUNCH_ORCHESTRATOR.bat
 + /LAUNCH_ORCHESTRATOR.command
 + /LAUNCH_ORCHESTRATOR.sh

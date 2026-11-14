@@ -16,17 +16,22 @@ public class ClusterToken {
     public static final String PREFIX = "mc-cluster://";
 
     public static String encode(ClusterConfig config) {
+        String bucket = config.bucket() != null ? config.bucket().trim() : "";
+        String keyId = config.keyId() != null ? config.keyId().trim().replaceAll("[^a-zA-Z0-9]", "") : "";
+        String appKey = config.appKey() != null ? config.appKey().trim() : "";
+        String bwLimit = config.bandwidthLimit() != null && !config.bandwidthLimit().trim().isEmpty() ? config.bandwidthLimit().trim() : "10M";
+
         StringBuilder json = new StringBuilder("{");
-        json.append("\"b2_bucket\":\"").append(escapeJson(config.bucket())).append("\",");
-        json.append("\"b2_key_id\":\"").append(escapeJson(config.keyId())).append("\",");
-        json.append("\"b2_application_key\":\"").append(escapeJson(config.appKey())).append("\",");
-        json.append("\"stale_timeout_minutes\":").append(config.staleMinutes()).append(",");
-        json.append("\"b2_bandwidth_limit\":\"").append(escapeJson(config.bandwidthLimit())).append("\"");
-        if (config.domain() != null && !config.domain().isEmpty()) {
-            json.append(",\"domain\":\"").append(escapeJson(config.domain())).append("\"");
+        json.append("\"b2_bucket\":\"").append(escapeJson(bucket)).append("\",");
+        json.append("\"b2_key_id\":\"").append(escapeJson(keyId)).append("\",");
+        json.append("\"b2_application_key\":\"").append(escapeJson(appKey)).append("\",");
+        json.append("\"stale_timeout_minutes\":").append(config.staleMinutes() > 0 ? config.staleMinutes() : 10).append(",");
+        json.append("\"b2_bandwidth_limit\":\"").append(escapeJson(bwLimit)).append("\"");
+        if (config.domain() != null && !config.domain().trim().isEmpty()) {
+            json.append(",\"domain\":\"").append(escapeJson(config.domain().trim())).append("\"");
         }
-        if (config.token() != null && !config.token().isEmpty()) {
-            json.append(",\"token\":\"").append(escapeJson(config.token())).append("\"");
+        if (config.token() != null && !config.token().trim().isEmpty()) {
+            json.append(",\"token\":\"").append(escapeJson(config.token().trim())).append("\"");
         }
         json.append("}");
 
@@ -37,6 +42,11 @@ public class ClusterToken {
     public static ClusterConfig decode(String tokenStr) {
         if (tokenStr == null) return null;
         String raw = tokenStr.trim();
+        if (raw.startsWith("```") && raw.endsWith("```") && raw.length() >= 6) {
+            raw = raw.substring(3, raw.length() - 3).trim();
+        } else if (raw.startsWith("`") && raw.endsWith("`") && raw.length() >= 2) {
+            raw = raw.substring(1, raw.length() - 1).trim();
+        }
         if (raw.startsWith(PREFIX)) {
             raw = raw.substring(PREFIX.length()).trim();
         }
@@ -59,7 +69,14 @@ public class ClusterToken {
                 return null;
             }
 
-            return new ClusterConfig(bucket, keyId, appKey, stale, bw, domain, token);
+            bucket = bucket.trim();
+            keyId = keyId.trim().replaceAll("[^a-zA-Z0-9]", "");
+            appKey = appKey.trim();
+            if (bucket.isEmpty() || keyId.isEmpty() || appKey.isEmpty()) {
+                return null;
+            }
+
+            return new ClusterConfig(bucket, keyId, appKey, stale, bw.trim(), domain != null ? domain.trim() : null, token != null ? token.trim() : null);
         } catch (Exception e) {
             return null;
         }

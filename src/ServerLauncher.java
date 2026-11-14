@@ -17,7 +17,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.3";
+    public static final String APP_VERSION = "2.1.4";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -187,21 +187,18 @@ public class ServerLauncher {
                         return;
 
                     case "push-launcher":
-                        if (!hasB2) {
-                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
-                            return;
-                        }
-                        pushLauncherToB2(rootDir, rclone, b2Target);
+                        System.out.println("[INFO] Software distribution is managed via GitHub Releases.");
+                        System.out.println("Admins and co-hosts update via: https://github.com/WwFour13/mc-cluster-orchestrator/releases");
                         return;
 
                     case "update":
-                        if (!hasB2) {
-                            System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
-                            return;
-                        }
-                        boolean hasUpdate = checkLauncherUpdate(rootDir, rclone, b2Target);
-                        if (!hasUpdate) {
-                            System.out.println("[UPDATE] ServerLauncher is already up to date.");
+                        System.out.println("[INFO] Checking GitHub for orchestrator updates...");
+                        GitHubUpdateChecker.UpdateInfo info = GitHubUpdateChecker.checkForUpdate(APP_VERSION, GitHubUpdateChecker.DEFAULT_REPO);
+                        if (info.hasUpdate()) {
+                            System.out.printf("[UPDATE] New release v%s available! Visit: https://github.com/%s/releases%n",
+                                    info.latestVersion(), GitHubUpdateChecker.DEFAULT_REPO);
+                        } else {
+                            System.out.println("[UPDATE] Orchestrator is already up to date (v" + APP_VERSION + ").");
                         }
                         return;
 
@@ -258,6 +255,12 @@ public class ServerLauncher {
                         }
                         String statusAddr = extractJsonString(configJson, "server_address");
                         if (statusAddr == null || statusAddr.isEmpty()) {
+                            statusAddr = resolvePlayitAddressFromToml(rootDir);
+                            if (statusAddr != null && !statusAddr.isEmpty()) {
+                                saveServerAddressToConfig(rootDir, statusAddr);
+                            }
+                        }
+                        if (statusAddr == null || statusAddr.isEmpty()) {
                             statusAddr = extractJsonString(configJson, "domain");
                             if (statusAddr != null && !statusAddr.isEmpty()) statusAddr += ".duckdns.org";
                         }
@@ -310,6 +313,12 @@ public class ServerLauncher {
             // Dual-Layer Tunnel Ping Guard: check if a server is actively running on the public address
             String targetServerAddr = extractJsonString(configJson, "server_address");
             if (targetServerAddr == null || targetServerAddr.isEmpty()) {
+                targetServerAddr = resolvePlayitAddressFromToml(rootDir);
+                if (targetServerAddr != null && !targetServerAddr.isEmpty()) {
+                    saveServerAddressToConfig(rootDir, targetServerAddr);
+                }
+            }
+            if (targetServerAddr == null || targetServerAddr.isEmpty()) {
                 targetServerAddr = extractJsonString(configJson, "domain");
                 if (targetServerAddr != null && !targetServerAddr.isEmpty()) targetServerAddr += ".duckdns.org";
             }
@@ -337,13 +346,6 @@ public class ServerLauncher {
                 return;
             }
 
-            // 0. Pre-Flight Launcher Update Check
-            if (hasB2) {
-                if (checkLauncherUpdate(rootDir, rclone, b2Target)) {
-                    System.exit(100);
-                }
-            }
-
             // 1. Port Verification
             System.out.println("[1/6] Verifying port 25565 availability...");
             if (!isPortAvailable(25565)) {
@@ -355,6 +357,16 @@ public class ServerLauncher {
             System.out.println("[2/6] Evaluating cluster lock state...");
 
             if (hasB2) {
+                // Anti-Split-Brain Gate: ensure cloud state is reachable and verifiable
+                CloudGenerationResult cCheck = checkCloudGeneration(rootDir, rclone, b2Target);
+                if (cCheck.status() != CloudGenerationResult.Status.OK && cCheck.status() != CloudGenerationResult.Status.FRESH_BUCKET) {
+                    System.err.println("\n========================================================");
+                    System.err.println("[SPLIT-BRAIN GUARD] Cloud state check failed!");
+                    System.err.println("  Reason: " + cCheck.detailMessage());
+                    System.err.println("  Launch aborted to prevent split-brain conflicts & world corruption.");
+                    System.err.println("========================================================\n");
+                    return;
+                }
                 if (!acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
                     return;
                 }
@@ -782,8 +794,12 @@ public class ServerLauncher {
         }
     }
 
+    public static CommandResult readCloudLock(Path rootDir, String rclone, String b2Target) {
+        return runCommand(15, rootDir, rclone, "cat", b2Target + "/cluster.lock");
+    }
+
     public static boolean isCloudLocked(Path rootDir, String rclone, String b2Target, int staleMin) {
-        CommandResult catRes = runCommand(rootDir, rclone, "cat", b2Target + "/cluster.lock");
+        CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
         if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
             String activeHost = extractJsonString(catRes.stdout, "host");
             String timestampStr = extractJsonString(catRes.stdout, "timestamp");
@@ -803,7 +819,7 @@ public class ServerLauncher {
     }
 
     public static String readLockHost(Path rootDir, String rclone, String b2Target) {
-        CommandResult catRes = runCommand(rootDir, rclone, "cat", b2Target + "/cluster.lock");
+        CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
         if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
             String activeHost = extractJsonString(catRes.stdout, "host");
             if (activeHost != null && !activeHost.isEmpty()) {
@@ -813,8 +829,18 @@ public class ServerLauncher {
         return "Active Peer";
     }
 
+    public record CloudGenerationResult(
+            int generation,
+            Status status,
+            String detailMessage
+    ) {
+        public enum Status {
+            OK, FRESH_BUCKET, TIMEOUT, AUTH_ERROR, CLOCK_SKEW, NETWORK_ERROR, CORRUPT_JSON, QUOTA_EXCEEDED, ERROR
+        }
+    }
+
     public static boolean acquireCloudLock(Path rootDir, String rclone, String b2Target, String host, int staleMin) {
-        CommandResult catRes = runCommand(rootDir, rclone, "cat", b2Target + "/cluster.lock");
+        CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
         if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
             String activeHost = extractJsonString(catRes.stdout, "host");
             String timestampStr = extractJsonString(catRes.stdout, "timestamp");
@@ -831,41 +857,108 @@ public class ServerLauncher {
                     }
                 } catch (Exception ignored) {}
             }
+        } else if (catRes.exitCode != 0) {
+            String err = catRes.stderr != null ? catRes.stderr.toLowerCase() : "";
+            boolean isMissing = catRes.exitCode == 3 || catRes.exitCode == 4
+                    || err.contains("status code: 404")
+                    || err.contains("status code 404")
+                    || err.contains("404 not found")
+                    || err.contains("http status 404")
+                    || err.contains("nosuchkey")
+                    || err.contains("object not found")
+                    || err.contains("file not found")
+                    || err.contains("directory not found");
+            if (!isMissing) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cannot verify cloud lock status due to network or cloud error: " + (catRes.stderr.isEmpty() ? "Exit code " + catRes.exitCode : catRes.stderr));
+                System.err.println("Lock acquisition aborted to prevent duplicate concurrent hosting!");
+                return false;
+            }
         }
-        writeCloudHeartbeat(rootDir, rclone, b2Target, host);
+        CommandResult writeRes = writeCloudHeartbeat(rootDir, rclone, b2Target, host);
+        if (writeRes.exitCode != 0) {
+            System.err.println("[SPLIT-BRAIN GUARD] Failed to publish cloud lock to B2 (Code: " + writeRes.exitCode + "): " + writeRes.stderr);
+            return false;
+        }
         System.out.println("Cloud lock successfully acquired by: " + host);
         return true;
     }
 
     public static void releaseCloudLock(Path rootDir, String rclone, String b2Target) {
-        runCommand(rootDir, rclone, "deletefile", b2Target + "/cluster.lock");
+        runCommand(15, rootDir, rclone, "deletefile", b2Target + "/cluster.lock");
     }
 
-    public static void writeCloudHeartbeat(Path rootDir, String rclone, String b2Target, String host) {
+    public static CommandResult writeCloudHeartbeat(Path rootDir, String rclone, String b2Target, String host) {
         String lockJson = String.format("{\"host\":\"%s\",\"timestamp\":\"%s\"}",
                 host, DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
-        runCommandWithInput(lockJson, rootDir, rclone, "rcat", b2Target + "/cluster.lock");
+        return runCommandWithInput(15, lockJson, rootDir, rclone, "rcat", b2Target + "/cluster.lock");
+    }
+
+    public static CloudGenerationResult checkCloudGeneration(Path rootDir, String rclone, String b2Target) {
+        if (b2Target == null || b2Target.isEmpty()) {
+            return new CloudGenerationResult(-1, CloudGenerationResult.Status.ERROR, "No cloud target configured.");
+        }
+        CommandResult res = runCommand(15, rootDir, rclone, "cat", b2Target + "/manifest.json");
+        if (res.exitCode == 0 && !res.stdout.isEmpty()) {
+            int gen = extractJsonInt(res.stdout, "generation", -1);
+            if (gen > 0) {
+                return new CloudGenerationResult(gen, CloudGenerationResult.Status.OK, "Verified Cloud Generation #" + gen);
+            } else {
+                return new CloudGenerationResult(-1, CloudGenerationResult.Status.CORRUPT_JSON, "Corrupted manifest.json in cloud (Missing 'generation' key)");
+            }
+        }
+        if (isQuotaExceeded(res)) {
+            return new CloudGenerationResult(-1, CloudGenerationResult.Status.QUOTA_EXCEEDED, "Backblaze B2 daily download/transaction quota exceeded");
+        }
+        String err = res.stderr != null ? res.stderr.toLowerCase() : "";
+        if (res.exitCode == -1 && (err.contains("timed out") || res.stdout.isEmpty())) {
+            return new CloudGenerationResult(-1, CloudGenerationResult.Status.TIMEOUT, "Cloud query timed out after 15s (Network latency or stalled socket)");
+        }
+        if (err.contains("unauthorized") || err.contains("bad_auth_token") || err.contains("invalid_key")
+                || err.contains("accessdenied") || err.contains("signaturedoesnotmatch") || err.contains("401 unauthorized")
+                || err.contains("invalidaccesskeyid") || err.contains("malformed access key") || err.contains("statuscode: 403")) {
+            return new CloudGenerationResult(-1, CloudGenerationResult.Status.AUTH_ERROR, "B2 Authentication Failed (Check Key ID & Application Key in Settings)");
+        }
+        if (err.contains("time may be set wrong") || err.contains("clock skew") || err.contains("different from this computer")) {
+            return new CloudGenerationResult(-1, CloudGenerationResult.Status.CLOCK_SKEW, "System Clock Skew Detected (VM/PC time desynchronized from cloud)");
+        }
+        boolean isExplicitNotFound = res.exitCode == 3 || res.exitCode == 4
+                || err.contains("status code: 404")
+                || err.contains("status code 404")
+                || err.contains("404 not found")
+                || err.contains("http status 404")
+                || err.contains("nosuchkey")
+                || err.contains("object not found")
+                || err.contains("file not found")
+                || err.contains("directory not found")
+                || (res.exitCode == 0 && res.stdout.isEmpty());
+
+        if (isExplicitNotFound) {
+            return new CloudGenerationResult(1, CloudGenerationResult.Status.FRESH_BUCKET, "Fresh Bucket (No manifest found; starting Generation #1)");
+        }
+        if (err.contains("dial tcp") || err.contains("no such host") || err.contains("connection refused") || err.contains("network is unreachable") || err.contains("tls handshake timeout")) {
+            return new CloudGenerationResult(-1, CloudGenerationResult.Status.NETWORK_ERROR, "Network Unreachable (Unable to reach Backblaze B2)");
+        }
+        String nonNoticeErr = res.stderr.lines()
+                .filter(line -> !line.contains("NOTICE:"))
+                .collect(java.util.stream.Collectors.joining(" "))
+                .trim();
+        String summary = !nonNoticeErr.isEmpty() ? nonNoticeErr :
+                (!res.stderr.isEmpty() ? res.stderr.lines().findFirst().orElse("Unknown error") : "Command exited with code " + res.exitCode);
+        return new CloudGenerationResult(-1, CloudGenerationResult.Status.ERROR, summary);
     }
 
     public static int readCloudGeneration(Path rootDir, String rclone, String b2Target) {
-        CommandResult res = runCommand(rootDir, rclone, "cat", b2Target + "/manifest.json");
-        if (res.exitCode == 0 && !res.stdout.isEmpty()) {
-            return extractJsonInt(res.stdout, "generation", 1);
-        }
-        if (isQuotaExceeded(res)) {
-            return -1;
-        }
-        return 1;
+        return checkCloudGeneration(rootDir, rclone, b2Target).generation();
     }
 
     public static void writeCloudGeneration(Path rootDir, String rclone, String b2Target, int gen, String host) {
         String json = String.format("{\"generation\":%d,\"last_host\":\"%s\",\"timestamp\":\"%s\",\"orchestrator_version\":\"%s\",\"min_orchestrator_version\":\"%s\"}",
                 gen, host, DateTimeFormatter.ISO_INSTANT.format(Instant.now()), APP_VERSION, APP_VERSION);
-        runCommandWithInput(json, rootDir, rclone, "rcat", b2Target + "/manifest.json");
+        runCommandWithInput(15, json, rootDir, rclone, "rcat", b2Target + "/manifest.json");
     }
 
     public static String readCloudMinVersion(Path rootDir, String rclone, String b2Target) {
-        CommandResult res = runCommand(rootDir, rclone, "cat", b2Target + "/manifest.json");
+        CommandResult res = runCommand(15, rootDir, rclone, "cat", b2Target + "/manifest.json");
         if (res.exitCode == 0 && !res.stdout.isEmpty()) {
             return extractJsonString(res.stdout, "min_orchestrator_version");
         }
@@ -902,7 +995,19 @@ public class ServerLauncher {
         if (Files.exists(sessionFile)) {
             try {
                 String json = Files.readString(sessionFile);
-                return extractJsonInt(json, "base_generation", 1);
+                int gen = extractJsonInt(json, "base_generation", -1);
+                if (gen > 0) return gen;
+            } catch (Exception ignored) {}
+        }
+        Path manifestFile = rootDir.resolve("manifest.json");
+        if (Files.exists(manifestFile)) {
+            try {
+                String json = Files.readString(manifestFile);
+                int gen = extractJsonInt(json, "generation", -1);
+                if (gen > 0) {
+                    writeLocalGeneration(rootDir, gen);
+                    return gen;
+                }
             } catch (Exception ignored) {}
         }
         return 1;
@@ -955,21 +1060,57 @@ public class ServerLauncher {
         return null;
     }
 
+    public static String resolvePlayitAddressFromToml(Path rootDir) {
+        Path playitToml = rootDir.resolve("playit.toml");
+        if (!Files.exists(playitToml)) return null;
+        String playitBin = findPlayit(rootDir);
+        if (playitBin == null) return null;
+        try {
+            CommandResult res = runCommand(5, rootDir, playitBin, "--secret_path", playitToml.toAbsolutePath().toString(), "tunnels", "list");
+            if (res.exitCode == 0 && !res.stdout.isEmpty()) {
+                String domain = extractJsonString(res.stdout, "assigned_srv");
+                if (domain == null || domain.isEmpty()) {
+                    domain = extractJsonString(res.stdout, "assigned_domain");
+                }
+                if (domain != null && !domain.isEmpty()) {
+                    return domain;
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    public static void saveServerAddressToConfig(Path rootDir, String address) {
+        if (address == null || address.isEmpty()) return;
+        try {
+            Path cfg = rootDir.resolve("config.json");
+            if (Files.exists(cfg)) {
+                String json = Files.readString(cfg);
+                if (json.contains("\"server_address\"")) {
+                    json = json.replaceAll("\"server_address\"\\s*:\\s*\"[^\"]*\"", "\"server_address\": \"" + address + "\"");
+                } else {
+                    int lastBrace = json.lastIndexOf('}');
+                    if (lastBrace != -1) {
+                        String prefix = json.substring(0, lastBrace).trim();
+                        if (prefix.endsWith(",")) {
+                            json = prefix + "\n  \"server_address\": \"" + address + "\"\n}";
+                        } else {
+                            json = prefix + ",\n  \"server_address\": \"" + address + "\"\n}";
+                        }
+                    }
+                }
+                Files.writeString(cfg, json, StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING);
+            }
+        } catch (Exception ignored) {}
+    }
+
     public static void publishAdminUpdate(Path rootDir, String rclone, String b2Target) {
         System.out.println("\n========================================================");
         System.out.println("[MC Cluster] Publishing Administrative Update to Cloud...");
         System.out.println("========================================================");
 
-        // 1. First ensure ServerLauncher.jar is pushed to root of b2Target for pre-flight launcher updates
-        Path jarPath = rootDir.resolve("ServerLauncher.jar");
-        if (Files.exists(jarPath)) {
-            System.out.println("[1/2] Updating master ServerLauncher.jar in B2...");
-            runCommand(rootDir, rclone, "copyto", jarPath.toString(), b2Target + "/ServerLauncher.jar");
-            runCommand(rootDir, rclone, "copyto", jarPath.toString(), b2Target + "/ServerLauncher.jar.update");
-        }
-
-        // 2. Push full runtime assets (plugins, core.dat, configs, daemons) to b2Target/dist
-        System.out.println("[2/2] Synchronizing runtime assets (plugins, core, configs, daemons) to B2...");
+        // Synchronize runtime server assets (plugins, core.dat, configs, daemons) to b2Target/dist
+        System.out.println("[1/1] Synchronizing runtime server assets (plugins, core, configs, daemons) to B2...");
         Path filterPath = rootDir.resolve("admin-dist-filter.txt");
         String[] cmd;
         if (Files.exists(filterPath)) {
@@ -1013,47 +1154,11 @@ public class ServerLauncher {
     }
 
     public static void pushLauncherToB2(Path rootDir, String rclone, String b2Target) {
-        Path jarPath = rootDir.resolve("ServerLauncher.jar");
-        if (!Files.exists(jarPath)) {
-            System.err.println("[ERROR] ServerLauncher.jar not found in " + rootDir);
-            return;
-        }
-        System.out.println("[Launcher Push] Uploading ServerLauncher.jar to Backblaze B2...");
-        CommandResult res = runCommand(rootDir, rclone, "copyto", jarPath.toString(), b2Target + "/ServerLauncher.jar");
-        if (res.exitCode == 0) {
-            int currentGen = readCloudGeneration(rootDir, rclone, b2Target);
-            writeCloudGeneration(rootDir, rclone, b2Target, currentGen, getHostName());
-            System.out.println("[Manifest] Enforced orchestrator version v" + APP_VERSION + " in cloud manifest.");
-            System.out.println("\n========================================================");
-            System.out.println("[SUCCESS] ServerLauncher.jar successfully uploaded to B2!");
-            System.out.println("  Cloud target: " + b2Target + "/ServerLauncher.jar");
-            System.out.println("  World files, generations, and locks remain untouched.");
-            System.out.println("  Next time any hoster launches via START_SERVER, they");
-            System.out.println("  will automatically receive and run this new ServerLauncher!");
-            System.out.println("========================================================\n");
-        } else {
-            System.err.println("[ERROR] Failed to upload ServerLauncher.jar: " + res.stderr);
-        }
+        System.out.println("[INFO] Software distribution is managed via GitHub Releases.");
+        System.out.println("Admins and co-hosts update via: https://github.com/WwFour13/mc-cluster-orchestrator/releases");
     }
 
     public static boolean checkLauncherUpdate(Path rootDir, String rclone, String b2Target) {
-        try {
-            Path runningJar = getRunningJarPath();
-            Path updateJar = runningJar.resolveSibling("ServerLauncher.jar.update");
-            CommandResult res = runCommand(rootDir, rclone, "copyto", b2Target + "/ServerLauncher.jar", updateJar.toString(), "--update");
-            if (res.exitCode == 0 && Files.exists(updateJar)) {
-                if (Files.exists(runningJar) && isSameContent(runningJar, updateJar)) {
-                    Files.deleteIfExists(updateJar);
-                    return false;
-                }
-                System.out.println("\n========================================================");
-                System.out.println("[UPDATE] Downloaded updated ServerLauncher.jar from B2!");
-                System.out.println("  Applying update and restarting launcher automatically...");
-                System.out.println("========================================================\n");
-                applyUpdateAndRelaunch(runningJar, updateJar);
-                return true;
-            }
-        } catch (Exception ignored) {}
         return false;
     }
 
@@ -1090,6 +1195,29 @@ public class ServerLauncher {
     }
 
     public static String getB2Remote(String bucket, String keyId, String appKey) {
+        return getB2Remote(bucket, keyId, appKey, null);
+    }
+
+    public static String getB2Remote(String bucket, String keyId, String appKey, String endpoint) {
+        if (bucket == null || bucket.trim().isEmpty()) return "";
+        bucket = bucket.trim();
+        if (keyId != null) keyId = keyId.trim().replaceAll("[^a-zA-Z0-9]", "");
+        if (appKey != null) appKey = appKey.trim();
+        if (endpoint != null) endpoint = endpoint.trim();
+
+        if (endpoint != null && !endpoint.isEmpty()) {
+            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s:%s/server",
+                    endpoint, keyId, appKey, bucket);
+        }
+        if (keyId != null && keyId.length() >= 3 && keyId.matches("^00[0-9].*")) {
+            String cluster = keyId.substring(0, 3);
+            String region = "us-west-";
+            if (cluster.equals("005")) region = "us-east-";
+            else if (cluster.equals("003")) region = "eu-central-";
+            String s3Endpoint = "s3." + region + cluster + ".backblazeb2.com";
+            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s:%s/server",
+                    s3Endpoint, keyId, appKey, bucket);
+        }
         return String.format(":b2,account=\"%s\",key=\"%s\":%s/server", keyId, appKey, bucket);
     }
 
@@ -1110,6 +1238,10 @@ public class ServerLauncher {
     }
 
     public static CommandResult runCommand(Path workingDir, String... command) {
+        return runCommand(0, workingDir, command);
+    }
+
+    public static CommandResult runCommand(long timeoutSeconds, Path workingDir, String... command) {
         try {
             ProcessBuilder pb = new ProcessBuilder(command);
             if (workingDir != null) pb.directory(workingDir.toFile());
@@ -1128,16 +1260,30 @@ public class ServerLauncher {
             });
             outThread.start();
             errThread.start();
-            int exitCode = p.waitFor();
+            if (timeoutSeconds > 0) {
+                boolean finished = p.waitFor(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS);
+                if (!finished) {
+                    p.destroyForcibly();
+                    outThread.interrupt();
+                    errThread.interrupt();
+                    return new CommandResult(-1, stdout.toString().trim(), "Command timed out after " + timeoutSeconds + "s");
+                }
+            } else {
+                p.waitFor();
+            }
             outThread.join(3000);
             errThread.join(3000);
-            return new CommandResult(exitCode, stdout.toString().trim(), stderr.toString().trim());
+            return new CommandResult(p.exitValue(), stdout.toString().trim(), stderr.toString().trim());
         } catch (Exception e) {
             return new CommandResult(-1, "", e.getMessage());
         }
     }
 
     public static CommandResult runCommandWithInput(String input, Path workingDir, String... command) {
+        return runCommandWithInput(0, input, workingDir, command);
+    }
+
+    public static CommandResult runCommandWithInput(long timeoutSeconds, String input, Path workingDir, String... command) {
         try {
             ProcessBuilder pb = new ProcessBuilder(command);
             if (workingDir != null) pb.directory(workingDir.toFile());
@@ -1162,10 +1308,20 @@ public class ServerLauncher {
             });
             outThread.start();
             errThread.start();
-            int exitCode = p.waitFor();
+            if (timeoutSeconds > 0) {
+                boolean finished = p.waitFor(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS);
+                if (!finished) {
+                    p.destroyForcibly();
+                    outThread.interrupt();
+                    errThread.interrupt();
+                    return new CommandResult(-1, stdout.toString().trim(), "Command timed out after " + timeoutSeconds + "s");
+                }
+            } else {
+                p.waitFor();
+            }
             outThread.join(3000);
             errThread.join(3000);
-            return new CommandResult(exitCode, stdout.toString().trim(), stderr.toString().trim());
+            return new CommandResult(p.exitValue(), stdout.toString().trim(), stderr.toString().trim());
         } catch (Exception e) {
             return new CommandResult(-1, "", e.getMessage());
         }
@@ -1325,7 +1481,7 @@ public class ServerLauncher {
 
     public static String extractJsonString(String json, String key) {
         Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*\"([^\"]+)\"").matcher(json);
-        return m.find() ? m.group(1) : "";
+        return m.find() ? m.group(1).trim() : "";
     }
 
     public static int extractJsonInt(String json, String key, int def) {
@@ -1485,7 +1641,7 @@ public class ServerLauncher {
                     "bukkit.yml", "commands.yml", "ops.json", "whitelist.json", "banned-players.json",
                     "banned-ips.json", "eula.txt", "LAUNCH_ORCHESTRATOR.bat", "START_SERVER.bat",
                     "rclone-filter.txt", "admin-dist-filter.txt", "MinecraftCluster.exe", "ServerLauncher.jar",
-                    "playit.toml"
+                    "playit.toml", ".cluster_session"
             };
 
             for (String fName : configFiles) {
@@ -1498,6 +1654,7 @@ public class ServerLauncher {
             // 5. Ensure manifest.json is embedded with the local generation
             Path manifestPath = rootDir.resolve("manifest.json");
             int localGen = readLocalGeneration(rootDir);
+            writeLocalGeneration(rootDir, localGen);
             String mJson;
             if (Files.exists(manifestPath)) {
                 mJson = Files.readString(manifestPath);
@@ -1554,8 +1711,14 @@ public class ServerLauncher {
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(zipPath)))) {
             ZipEntry entry;
             byte[] buf = new byte[8192];
+            int entryCount = 0;
             while ((entry = zis.getNextEntry()) != null) {
-                Path outPath = targetDir.resolve(entry.getName());
+                entryCount++;
+                String entryName = entry.getName();
+                if (entryCount % 15 == 0 || entryName.endsWith(".jar") || entryName.endsWith(".mca") || entryName.endsWith(".dat") || entryName.endsWith(".json")) {
+                    logger.accept("[Starter Pack] Extracting: " + entryName);
+                }
+                Path outPath = targetDir.resolve(entryName);
                 if (entry.isDirectory()) {
                     Files.createDirectories(outPath);
                 } else {
@@ -1577,6 +1740,18 @@ public class ServerLauncher {
         Path eulaFile = targetDir.resolve("eula.txt");
         Files.writeString(eulaFile, "# Accepted automatically by Minecraft Cluster Orchestrator\neula=true\n");
 
+        // Sync local generation session file from unpacked manifest
+        Path manifestFile = targetDir.resolve("manifest.json");
+        int starterGen = 1;
+        if (Files.exists(manifestFile)) {
+            try {
+                String mJson = Files.readString(manifestFile);
+                starterGen = extractJsonInt(mJson, "generation", 1);
+            } catch (Exception ignored) {}
+        }
+        writeLocalGeneration(targetDir, starterGen);
+        logger.accept("[Starter Pack] Initialized local cluster session at Generation #" + starterGen);
+
         // Read config.json to identify cluster details
         Path cfgFile = targetDir.resolve("config.json");
         String clusterId = "cluster-" + System.currentTimeMillis();
@@ -1588,6 +1763,15 @@ public class ServerLauncher {
             String json = Files.readString(cfgFile);
             bucket = extractJsonString(json, "b2_bucket");
             domain = extractJsonString(json, "domain");
+            String sAddr = extractJsonString(json, "server_address");
+            if (sAddr.isEmpty()) {
+                String playitDomain = resolvePlayitAddressFromToml(targetDir);
+                if (playitDomain != null && !playitDomain.isEmpty()) {
+                    saveServerAddressToConfig(targetDir, playitDomain);
+                    domain = playitDomain;
+                    logger.accept("[Starter Pack] Configured PlayIt endpoint: " + playitDomain);
+                }
+            }
             if (!bucket.isEmpty()) {
                 clusterId = bucket.toLowerCase().replaceAll("[^a-z0-9_-]", "-");
                 clusterName = bucket.replace("-", " ");
@@ -1611,11 +1795,16 @@ public class ServerLauncher {
         logger.accept("[Co-host Sync] Updating active cluster from " + zipPath.getFileName() + "...");
 
         int newGen = -1;
+        int entryCount = 0;
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(zipPath)))) {
             ZipEntry entry;
             byte[] buf = new byte[8192];
             while ((entry = zis.getNextEntry()) != null) {
+                entryCount++;
                 String name = entry.getName();
+                if (entryCount % 15 == 0 || name.endsWith(".jar") || name.endsWith(".mca") || name.endsWith(".dat") || name.endsWith(".json")) {
+                    logger.accept("[Co-host Sync] Updating: " + name);
+                }
                 // Never overwrite existing local config.json to preserve local machine preferences & keys
                 if ("config.json".equalsIgnoreCase(name) && Files.exists(rootDir.resolve("config.json"))) {
                     zis.closeEntry();

@@ -91,6 +91,7 @@ public class ClusterGUI extends JFrame {
     private BufferedWriter activeMcStdin = null;
     private ScheduledExecutorService heartbeatScheduler;
     private final ExecutorService workerPool = Executors.newCachedThreadPool();
+    private volatile ServerLauncher.CloudGenerationResult lastCloudGenerationResult = null;
 
     public ClusterGUI(Path rootDir) {
         this.clusterRegistry = ClusterRegistry.getInstance(rootDir);
@@ -768,7 +769,7 @@ public class ClusterGUI extends JFrame {
 
         JPanel statsStack = new JPanel(new GridLayout(2, 1, 0, 4));
         statsStack.setOpaque(false);
-        adminGenLabel = new JLabel("Active World Generation: #14 (Latest Verified)");
+        adminGenLabel = new JLabel("Active World Generation: Checking cloud status...");
         adminGenLabel.setFont(new Font("Segoe UI", Font.BOLD, 13));
         adminGenLabel.setForeground(COLOR_TEXT_PRIMARY);
 
@@ -781,12 +782,21 @@ public class ClusterGUI extends JFrame {
         JPanel folderActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
         folderActions.setOpaque(false);
 
+        ModernButton refreshCloudBtn = new ModernButton("↻ Refresh Cloud", COLOR_BG_CARD, COLOR_BLUE, 11, 6);
+        refreshCloudBtn.setToolTipText("Re-query Backblaze B2 for latest cloud world generation & status");
+        refreshCloudBtn.addActionListener(e -> {
+            adminGenLabel.setText("Active World Generation: Polling cloud...");
+            adminGenLabel.setForeground(COLOR_AMBER);
+            refreshAdminTabState();
+        });
+
         ModernButton openDirBtn = new ModernButton("Open Server Folder", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
         openDirBtn.addActionListener(e -> openPathInExplorer(rootDir));
 
         ModernButton openPluginsBtn = new ModernButton("Open Plugins Folder", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
         openPluginsBtn.addActionListener(e -> openPathInExplorer(rootDir.resolve("plugins")));
 
+        folderActions.add(refreshCloudBtn);
         folderActions.add(openDirBtn);
         folderActions.add(openPluginsBtn);
 
@@ -820,14 +830,35 @@ public class ClusterGUI extends JFrame {
                 String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
                 String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
                 String rclone = ServerLauncher.findRclone(rootDir);
-                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+                String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
+                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
 
-                int cloudGen = ServerLauncher.readCloudGeneration(rootDir, rclone, b2Target);
+                ServerLauncher.CloudGenerationResult cloudCheck = ServerLauncher.checkCloudGeneration(rootDir, rclone, b2Target);
+                this.lastCloudGenerationResult = cloudCheck;
                 int localGen = ServerLauncher.readLocalGeneration(rootDir);
 
                 SwingUtilities.invokeLater(() -> {
-                    adminGenLabel.setText("Active World Generation: #" + cloudGen + " (Local Base: #" + localGen + ")");
-                    adminCloudLabel.setText("Cloud Provider: Backblaze B2 (" + bucket + ") | Anti-Collision Active");
+                    updatePrimaryButtonState();
+                    if (cloudCheck.status() == ServerLauncher.CloudGenerationResult.Status.OK) {
+                        adminGenLabel.setText("Active World Generation: #" + cloudCheck.generation() + " (Local Base: #" + localGen + ")");
+                        adminGenLabel.setForeground(COLOR_TEXT_PRIMARY);
+                        adminGenLabel.setToolTipText("Cloud generation verified from Backblaze B2");
+                        adminCloudLabel.setText("Cloud Provider: Backblaze B2 (" + bucket + ") | Anti-Collision Active");
+                        adminCloudLabel.setForeground(COLOR_TEXT_MUTED);
+                    } else if (cloudCheck.status() == ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
+                        adminGenLabel.setText("Active World Generation: #1 [Fresh Bucket] (Local Base: #" + localGen + ")");
+                        adminGenLabel.setForeground(COLOR_BLUE);
+                        adminGenLabel.setToolTipText("No remote manifest found; starting fresh generation");
+                        adminCloudLabel.setText("Cloud Provider: Backblaze B2 (" + bucket + ") | Initializing");
+                        adminCloudLabel.setForeground(COLOR_TEXT_MUTED);
+                    } else {
+                        adminGenLabel.setText("Active World Generation: ⚠️ " + cloudCheck.status() + " (Local Base: #" + localGen + ")");
+                        adminGenLabel.setForeground(COLOR_ROSE);
+                        adminGenLabel.setToolTipText(cloudCheck.detailMessage());
+                        adminCloudLabel.setText("Cloud Error: " + cloudCheck.detailMessage());
+                        adminCloudLabel.setForeground(COLOR_ROSE);
+                        appendConsoleLog("[Cloud Status] " + cloudCheck.detailMessage());
+                    }
                 });
             } catch (Exception ignored) {}
         });
@@ -846,6 +877,18 @@ public class ClusterGUI extends JFrame {
             if (bw == null || bw.isEmpty()) bw = "10M";
 
             String domain = ServerLauncher.extractJsonString(json, "domain");
+            if (domain == null || domain.isEmpty()) {
+                domain = ServerLauncher.extractJsonString(json, "server_address");
+            }
+            if (domain == null || domain.isEmpty()) {
+                domain = ServerLauncher.extractJsonString(json, "playit_address");
+            }
+            if (domain == null || domain.isEmpty()) {
+                domain = ServerLauncher.resolvePlayitAddressFromToml(rootDir);
+                if (domain != null && !domain.isEmpty()) {
+                    ServerLauncher.saveServerAddressToConfig(rootDir, domain);
+                }
+            }
             String tokenVal = ServerLauncher.extractJsonString(json, "token");
 
             ClusterToken.ClusterConfig config = new ClusterToken.ClusterConfig(bucket, keyId, appKey, stale, bw, domain, tokenVal);
@@ -1146,13 +1189,19 @@ public class ClusterGUI extends JFrame {
                 if (serverJar == null || serverJar.isEmpty()) serverJar = "bin/core.dat";
                 sAddr = ServerLauncher.extractJsonString(oldJson, "server_address");
             }
+            if (sAddr == null || sAddr.isEmpty()) {
+                sAddr = ServerLauncher.resolvePlayitAddressFromToml(rootDir);
+            }
+            if ((domain == null || domain.isEmpty()) && sAddr != null && !sAddr.isEmpty()) {
+                domain = sAddr.trim();
+            }
             StringBuilder sb = new StringBuilder("{\n");
             sb.append("  \"server_jar\": \"").append(serverJar).append("\",\n");
             if (sAddr != null && !sAddr.isEmpty()) {
-                sb.append("  \"server_address\": \"").append(sAddr).append("\",\n");
+                sb.append("  \"server_address\": \"").append(sAddr.trim()).append("\",\n");
             }
             sb.append("  \"b2_bucket\": \"").append(settingsBucketField.getText().trim()).append("\",\n");
-            sb.append("  \"b2_key_id\": \"").append(settingsKeyIdField.getText().trim()).append("\",\n");
+            sb.append("  \"b2_key_id\": \"").append(settingsKeyIdField.getText().trim().replaceAll("[^a-zA-Z0-9]", "")).append("\",\n");
             sb.append("  \"b2_application_key\": \"").append(settingsAppKeyField.getText().trim()).append("\",\n");
             sb.append("  \"java_memory\": \"").append(ramSlider.getValue()).append("G\",\n");
             sb.append("  \"stale_timeout_minutes\": 10,\n");
@@ -1283,12 +1332,7 @@ public class ClusterGUI extends JFrame {
 
         ModernButton starterAction = new ModernButton("Import Co-Host File (.zip)", COLOR_AMBER, Color.WHITE, 13, 8);
         starterAction.setPreferredSize(new Dimension(200, 44));
-        starterAction.addActionListener(e -> {
-            showImportClusterDialog();
-            if (isConfigured()) {
-                masterLayout.show(masterContainer, "VIEW_MAIN_APP");
-            }
-        });
+        starterAction.addActionListener(e -> showImportClusterDialog());
 
         starterCard.add(starterIconTitle, BorderLayout.NORTH);
         starterCard.add(starterText, BorderLayout.CENTER);
@@ -1680,6 +1724,13 @@ public class ClusterGUI extends JFrame {
                 primaryActionBtn.setBackgroundColor(COLOR_AMBER);
                 primaryActionBtn.setEnabled(true);
                 if (unconfiguredBanner != null) unconfiguredBanner.setVisible(true);
+            } else if (lastCloudGenerationResult != null &&
+                       lastCloudGenerationResult.status() != ServerLauncher.CloudGenerationResult.Status.OK &&
+                       lastCloudGenerationResult.status() != ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
+                primaryActionBtn.setText("⚠️  CLOUD STATE INDETERMINATE");
+                primaryActionBtn.setBackgroundColor(COLOR_AMBER);
+                primaryActionBtn.setEnabled(true);
+                if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
             } else {
                 primaryActionBtn.setText("▶  START CLUSTER SERVER");
                 primaryActionBtn.setBackgroundColor(COLOR_EMERALD);
@@ -1719,7 +1770,8 @@ public class ClusterGUI extends JFrame {
                 if (bwLimit == null || bwLimit.isEmpty()) bwLimit = "10M";
 
                 String rclone = ServerLauncher.findRclone(rootDir);
-                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+                String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
+                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
                 String localHost = ServerLauncher.getHostName();
                 Path lockPath = rootDir.resolve(".server_active.lock");
                 Path coreDat = rootDir.resolve("bin").resolve("core.dat");
@@ -1772,18 +1824,35 @@ public class ClusterGUI extends JFrame {
                 updateMilestoneStep(1, "2. Cloud Lock...", COLOR_AMBER, 35);
                 appendConsoleLog("[Step 2/5] Acquiring cluster cloud lock...");
                 if (!ServerLauncher.acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
-                    appendConsoleLog("[ABORT] Lock acquisition refused (Cluster is active on another host).");
-                    abortLaunch("Cluster lock is currently held by another host.");
+                    appendConsoleLog("[ABORT] Lock acquisition refused (Cluster is active on another host or cloud unreachable).");
+                    abortLaunch("CLOUD LOCK REFUSED (LAUNCH BLOCKED)\n\n" +
+                            "The orchestrator cannot secure exclusive hosting rights on Backblaze B2:\n" +
+                            "• Either another host is actively hosting this cluster, or\n" +
+                            "• Network / credential errors prevented cloud lock verification.\n\n" +
+                            "Launch has been safely halted to prevent split-brain conflicts.");
                     return;
                 }
                 ServerLauncher.cancelRemoteStop(rootDir, rclone, b2Target);
                 ServerLauncher.writeLockFile(lockPath, localHost);
                 updateMilestoneStep(1, "2. Lock Acquired", COLOR_EMERALD, 40);
 
-                // Milestone 3: World Sync
-                updateMilestoneStep(2, "3. Syncing Cloud...", COLOR_AMBER, 55);
+                // Milestone 3: World Sync & Anti-Split-Brain Gate
+                updateMilestoneStep(2, "3. Verifying Cloud...", COLOR_AMBER, 55);
                 appendConsoleLog("[Step 3/5] Verifying cloud generation & assessing bandwidth...");
-                int cloudGen = ServerLauncher.readCloudGeneration(rootDir, rclone, b2Target);
+                ServerLauncher.CloudGenerationResult cloudCheck = ServerLauncher.checkCloudGeneration(rootDir, rclone, b2Target);
+                if (cloudCheck.status() != ServerLauncher.CloudGenerationResult.Status.OK && cloudCheck.status() != ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
+                    appendConsoleLog("[SPLIT-BRAIN GUARD] Cloud check failed: " + cloudCheck.detailMessage());
+                    ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
+                    Files.deleteIfExists(lockPath);
+                    abortLaunch("CLOUD STATE INDETERMINATE (LAUNCH BLOCKED)\n\n" +
+                            "The orchestrator cannot verify the remote cloud state:\n" +
+                            "Reason: " + cloudCheck.detailMessage() + "\n\n" +
+                            "Launch has been safely blocked to prevent split-brain collisions.\n" +
+                            "Please check your internet connection, VM clock, or B2 keys in Settings.");
+                    return;
+                }
+
+                int cloudGen = cloudCheck.generation();
                 int localGen = ServerLauncher.readLocalGeneration(rootDir);
 
                 if (localGen > 0 && cloudGen > 0 && localGen == cloudGen && !ServerLauncher.isWorldEmpty(rootDir)) {
@@ -1792,6 +1861,8 @@ public class ClusterGUI extends JFrame {
                 } else {
                     double estMb = ServerLauncher.estimateEgressMb(rootDir, rclone, b2Target);
                     if (estMb > 600.0 || (estMb > 0 && ServerLauncher.isWorldEmpty(rootDir))) {
+                        ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
+                        Files.deleteIfExists(lockPath);
                         abortLaunch(String.format("LARGE CLOUD DOWNLOAD BLOCKED (%.1f MB)\n\n" +
                                 "This download would consume over 60%% of the cluster's daily free bandwidth.\n" +
                                 "To prevent locking out the cluster, automatic cloud download is restricted.\n\n" +
@@ -1811,6 +1882,8 @@ public class ClusterGUI extends JFrame {
                             });
                         } catch (Exception ignored) {}
                         if (userChoice[0] != JOptionPane.YES_OPTION) {
+                            ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
+                            Files.deleteIfExists(lockPath);
                             abortLaunch("Launch cancelled by user to preserve cloud download bandwidth.");
                             return;
                         }
@@ -1819,17 +1892,13 @@ public class ClusterGUI extends JFrame {
                     ServerLauncher.syncAdminDistribution(rootDir, rclone, b2Target);
                     boolean syncOk = ServerLauncher.pullFromB2(rootDir, rclone, b2Target, staleMin, true);
                     if (!syncOk) {
-                        appendConsoleLog("[WARN] World sync did not complete cleanly.");
-                        if (ServerLauncher.isWorldEmpty(rootDir)) {
-                            String countdown = ServerLauncher.getTimeUntilUtcMidnightFormatted();
-                            abortLaunch("Backblaze B2 Daily Download Cap Exceeded (403 Cap)\n\n" +
-                                    "The free tier daily bandwidth limit has been reached.\n" +
-                                    "Quota resets automatically at 00:00 UTC (in " + countdown + ").\n\n" +
-                                    "Workaround: Ask the active host for a 'cohost-files-YYYY-MM-DD.zip' to onboard without cloud egress.");
-                            return;
-                        } else {
-                            appendConsoleLog("[QUOTA NOTICE] Cloud sync was blocked by 403 quota, but local world is present. Launching local world...");
-                        }
+                        appendConsoleLog("[ABORT] World synchronization failed.");
+                        ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
+                        Files.deleteIfExists(lockPath);
+                        abortLaunch("WORLD SYNCHRONIZATION FAILED (LAUNCH BLOCKED)\n\n" +
+                                "Could not complete incremental sync with Backblaze B2.\n" +
+                                "Launch has been halted to prevent hosting an out-of-sync local world.");
+                        return;
                     }
                     updateMilestoneStep(2, "3. Synchronized", COLOR_EMERALD, 65);
                 }
@@ -2010,7 +2079,8 @@ public class ClusterGUI extends JFrame {
                     String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
                     String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
                     if (bucket != null && keyId != null && appKey != null) {
-                        String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+                        String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
+                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
                         String rclone = ServerLauncher.findRclone(rootDir);
                         ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
                     }
@@ -2092,10 +2162,13 @@ public class ClusterGUI extends JFrame {
                 String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
                 String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
                 String rclone = ServerLauncher.findRclone(rootDir);
-                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+                String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
+                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
 
-                ServerLauncher.CommandResult catRes = ServerLauncher.runCommand(rootDir, rclone, "cat", b2Target + "/cluster.lock");
+                ServerLauncher.CommandResult catRes = ServerLauncher.readCloudLock(rootDir, rclone, b2Target);
                 String minCloudVer = ServerLauncher.readCloudMinVersion(rootDir, rclone, b2Target);
+                ServerLauncher.CloudGenerationResult genCheck = ServerLauncher.checkCloudGeneration(rootDir, rclone, b2Target);
+                this.lastCloudGenerationResult = genCheck;
 
                 SwingUtilities.invokeLater(() -> {
                     if (minCloudVer != null && ServerLauncher.compareVersions(ServerLauncher.APP_VERSION, minCloudVer) < 0) {
@@ -2105,6 +2178,10 @@ public class ClusterGUI extends JFrame {
                     if (isServerRunning) {
                         statusBadge.setText("● Hosting Session (Local)");
                         statusBadge.setForeground(COLOR_BLUE);
+                    } else if (genCheck.status() != ServerLauncher.CloudGenerationResult.Status.OK && genCheck.status() != ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
+                        statusBadge.setText("● Cloud Error (" + genCheck.status() + ")");
+                        statusBadge.setForeground(COLOR_ROSE);
+                        statusBadge.setToolTipText(genCheck.detailMessage());
                     } else if (catRes.exitCode() == 0 && !catRes.stdout().isBlank()) {
                         String activeHost = ServerLauncher.extractJsonString(catRes.stdout(), "host");
                         statusBadge.setText("● Active on " + (activeHost != null ? activeHost : "Remote Host"));
@@ -2121,6 +2198,7 @@ public class ClusterGUI extends JFrame {
                             statusBadge.setForeground(COLOR_EMERALD);
                         }
                     }
+                    updatePrimaryButtonState();
                 });
             } catch (Exception e) {
                 SwingUtilities.invokeLater(() -> {
@@ -2140,9 +2218,21 @@ public class ClusterGUI extends JFrame {
                 if (addr == null || addr.isEmpty()) {
                     addr = ServerLauncher.extractJsonString(json, "playit_address");
                 }
-                if (addr != null && !addr.isEmpty() && !addr.contains("auto.tun")) {
-                    return addr;
+                if (addr == null || addr.isEmpty()) {
+                    addr = ServerLauncher.extractJsonString(json, "domain");
                 }
+                if (addr != null && !addr.isEmpty() && !addr.contains("auto.tun")) {
+                    return addr.contains(".") ? addr : addr + ".duckdns.org:25565";
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // Auto-resolve via PlayIt sidecar if playit.toml exists
+        try {
+            String playitAddr = ServerLauncher.resolvePlayitAddressFromToml(rootDir);
+            if (playitAddr != null && !playitAddr.isEmpty()) {
+                saveServerAddressToConfig(playitAddr);
+                return playitAddr;
             }
         } catch (Exception ignored) {}
 
@@ -2171,7 +2261,7 @@ public class ClusterGUI extends JFrame {
                 String json = Files.readString(cfg);
                 String domain = ServerLauncher.extractJsonString(json, "domain");
                 if (domain != null && !domain.isEmpty() && !domain.startsWith("YOUR_")) {
-                    return domain + ".duckdns.org:25565";
+                    return domain.contains(".") ? domain : domain + ".duckdns.org:25565";
                 }
             }
         } catch (Exception ignored) {}
@@ -2200,27 +2290,7 @@ public class ClusterGUI extends JFrame {
     }
 
     private void saveServerAddressToConfig(String address) {
-        if (address == null || address.isEmpty()) return;
-        try {
-            Path cfg = rootDir.resolve("config.json");
-            if (Files.exists(cfg)) {
-                String json = Files.readString(cfg);
-                if (json.contains("\"server_address\"")) {
-                    json = json.replaceAll("\"server_address\"\\s*:\\s*\"[^\"]*\"", "\"server_address\": \"" + address + "\"");
-                } else {
-                    int lastBrace = json.lastIndexOf('}');
-                    if (lastBrace != -1) {
-                        String prefix = json.substring(0, lastBrace).trim();
-                        if (prefix.endsWith(",")) {
-                            json = prefix + "\n  \"server_address\": \"" + address + "\"\n}";
-                        } else {
-                            json = prefix + ",\n  \"server_address\": \"" + address + "\"\n}";
-                        }
-                    }
-                }
-                Files.writeString(cfg, json, StandardCharsets.UTF_8, StandardOpenOption.TRUNCATE_EXISTING);
-            }
-        } catch (Exception ignored) {}
+        ServerLauncher.saveServerAddressToConfig(rootDir, address);
     }
 
     private void handleRemoteStopRequest() {
@@ -2236,7 +2306,8 @@ public class ClusterGUI extends JFrame {
                 String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
                 String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
                 String rclone = ServerLauncher.findRclone(rootDir);
-                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+                String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
+                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
 
                 ServerLauncher.dispatchRemoteStop(rootDir, rclone, b2Target, ServerLauncher.getHostName(), reason);
                 appendConsoleLog("[REMOTE STOP] Stop signal published to B2. Host will shut down in 30 seconds.");
@@ -2264,7 +2335,8 @@ public class ClusterGUI extends JFrame {
                     String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
                     String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
                     String rclone = ServerLauncher.findRclone(rootDir);
-                    String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+                    String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
+                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
                     ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
                     ServerLauncher.cancelRemoteStop(rootDir, rclone, b2Target);
                 }
@@ -2301,7 +2373,8 @@ public class ClusterGUI extends JFrame {
                 String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
                 String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
                 String rclone = ServerLauncher.findRclone(rootDir);
-                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+                String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
+                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
 
                 ServerLauncher.publishAdminUpdate(rootDir, rclone, b2Target);
                 appendConsoleLog("[CLOUD SYNC] Successfully published runtime configurations & plugins to B2!");
@@ -2352,7 +2425,8 @@ public class ClusterGUI extends JFrame {
                 String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
                 String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
                 String rclone = ServerLauncher.findRclone(rootDir);
-                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey);
+                String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
+                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
 
                 ServerLauncher.CommandResult res = ServerLauncher.purgeDeadRevisions(rootDir, rclone, b2Target);
                 if (res.exitCode() == 0) {
@@ -2679,10 +2753,15 @@ public class ClusterGUI extends JFrame {
                 if (choice == 0) {
                     // In-Place Update for Existing Hoster
                     appendConsoleLog("[Co-host Sync] Updating active cluster from " + zipFile.getName() + "...");
+                    ProgressModal modal = new ProgressModal(this, "📦 Updating Active Cluster", "Extracting files from " + zipFile.getName() + "...", COLOR_BLUE);
+                    modal.showAsync();
                     workerPool.submit(() -> {
                         try {
-                            int newGen = ServerLauncher.updateClusterInPlace(zipFile.toPath(), rootDir,
-                                    msg -> SwingUtilities.invokeLater(() -> appendConsoleLog(msg)));
+                            int newGen = ServerLauncher.updateClusterInPlace(zipFile.toPath(), rootDir, msg -> {
+                                SwingUtilities.invokeLater(() -> appendConsoleLog(msg));
+                                modal.updateMessage(msg);
+                            });
+                            modal.close();
                             SwingUtilities.invokeLater(() -> {
                                 refreshCloudLockStatus();
                                 resetMilestones();
@@ -2694,6 +2773,7 @@ public class ClusterGUI extends JFrame {
                                         "Cluster Updated", JOptionPane.INFORMATION_MESSAGE);
                             });
                         } catch (Exception ex) {
+                            modal.close();
                             SwingUtilities.invokeLater(() -> {
                                 JOptionPane.showMessageDialog(this, "Failed to update cluster:\n" + ex.getMessage(), "Import Error", JOptionPane.ERROR_MESSAGE);
                                 appendConsoleLog("[ERROR] In-place update failed: " + ex.getMessage());
@@ -2737,11 +2817,17 @@ public class ClusterGUI extends JFrame {
             final String finalClusterName = clusterName;
             appendConsoleLog("[Co-host Sync] Importing cluster into " + targetDir + "...");
 
+            ProgressModal modal = new ProgressModal(this, "📦 Importing Co-Host Starter Pack", "Unpacking world files, plugins, and binaries (0 MB egress)...", COLOR_AMBER);
+            modal.showAsync();
+
             workerPool.submit(() -> {
                 try {
-                    String clusterId = ServerLauncher.importStarterPack(zipFile.toPath(), targetDir, clusterRegistry,
-                            msg -> SwingUtilities.invokeLater(() -> appendConsoleLog(msg)));
+                    String clusterId = ServerLauncher.importStarterPack(zipFile.toPath(), targetDir, clusterRegistry, msg -> {
+                        SwingUtilities.invokeLater(() -> appendConsoleLog(msg));
+                        modal.updateMessage(msg);
+                    });
                     appendConsoleLog("[Co-host Sync] Successfully registered cluster profile: " + clusterId);
+                    modal.close();
 
                     SwingUtilities.invokeLater(() -> {
                         this.rootDir = targetDir;
@@ -2764,6 +2850,7 @@ public class ClusterGUI extends JFrame {
                         }
                     });
                 } catch (Exception ex) {
+                    modal.close();
                     SwingUtilities.invokeLater(() -> {
                         JOptionPane.showMessageDialog(this,
                                 "Failed to import sync pack:\n" + ex.getMessage(),
@@ -2867,19 +2954,24 @@ public class ClusterGUI extends JFrame {
         Path cfgPath = rootDir.resolve("config.json");
         StringBuilder sb = new StringBuilder("{\n");
         sb.append("  \"server_jar\": \"bin/core.dat\",\n");
-        sb.append("  \"b2_bucket\": \"").append(cfg.bucket()).append("\",\n");
-        sb.append("  \"b2_key_id\": \"").append(cfg.keyId()).append("\",\n");
-        sb.append("  \"b2_application_key\": \"").append(cfg.appKey()).append("\",\n");
+        sb.append("  \"b2_bucket\": \"").append(cfg.bucket().trim()).append("\",\n");
+        sb.append("  \"b2_key_id\": \"").append(cfg.keyId().trim().replaceAll("[^a-zA-Z0-9]", "")).append("\",\n");
+        sb.append("  \"b2_application_key\": \"").append(cfg.appKey().trim()).append("\",\n");
         sb.append("  \"java_memory\": \"").append(ramSlider != null ? ramSlider.getValue() + "G" : "6G").append("\",\n");
         sb.append("  \"stale_timeout_minutes\": ").append(cfg.staleMinutes() > 0 ? cfg.staleMinutes() : 10).append(",\n");
-        sb.append("  \"b2_bandwidth_limit\": \"").append(cfg.bandwidthLimit() != null && !cfg.bandwidthLimit().isEmpty() ? cfg.bandwidthLimit() : "10M").append("\",\n");
+        sb.append("  \"b2_bandwidth_limit\": \"").append(cfg.bandwidthLimit() != null && !cfg.bandwidthLimit().isEmpty() ? cfg.bandwidthLimit().trim() : "10M").append("\",\n");
         sb.append("  \"heartbeat_seconds\": 120,\n");
         sb.append("  \"save_interval_minutes\": 15");
-        if (cfg.domain() != null && !cfg.domain().isEmpty()) {
-            sb.append(",\n  \"domain\": \"").append(cfg.domain()).append("\"");
+        String domain = cfg.domain();
+        if (domain == null || domain.trim().isEmpty()) {
+            domain = ServerLauncher.resolvePlayitAddressFromToml(rootDir);
         }
-        if (cfg.token() != null && !cfg.token().isEmpty()) {
-            sb.append(",\n  \"token\": \"").append(cfg.token()).append("\"");
+        if (domain != null && !domain.trim().isEmpty()) {
+            sb.append(",\n  \"domain\": \"").append(domain.trim()).append("\"");
+            sb.append(",\n  \"server_address\": \"").append(domain.trim()).append("\"");
+        }
+        if (cfg.token() != null && !cfg.token().trim().isEmpty()) {
+            sb.append(",\n  \"token\": \"").append(cfg.token().trim()).append("\"");
         }
         sb.append("\n}\n");
         try {
@@ -2896,7 +2988,7 @@ public class ClusterGUI extends JFrame {
             active.bucket = cfg.bucket();
             active.name = cfg.bucket().replace("-", " ");
             if (cfg.domain() != null && !cfg.domain().isEmpty()) {
-                active.serverAddress = cfg.domain() + ".duckdns.org";
+                active.serverAddress = cfg.domain().contains(".") ? cfg.domain() : cfg.domain() + ".duckdns.org";
             }
             clusterRegistry.registerCluster(active);
         }
@@ -3152,6 +3244,72 @@ public class ClusterGUI extends JFrame {
             int g = Math.min(255, (int)(c.getGreen() * factor));
             int b = Math.min(255, (int)(c.getBlue() * factor));
             return new Color(r, g, b, c.getAlpha());
+        }
+    }
+
+    private static class ProgressModal {
+        final JDialog dialog;
+        final JLabel statusLabel;
+        final JProgressBar progressBar;
+
+        ProgressModal(JFrame parent, String title, String initialMsg, Color accentColor) {
+            dialog = new JDialog(parent, title, false);
+            dialog.setUndecorated(true);
+            dialog.setSize(480, 150);
+            dialog.setLocationRelativeTo(parent);
+
+            JPanel panel = new JPanel(new BorderLayout(0, 14));
+            panel.setBackground(COLOR_BG_CARD);
+            panel.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createLineBorder(COLOR_BORDER, 2),
+                    new EmptyBorder(22, 26, 22, 26)
+            ));
+
+            JLabel titleLbl = new JLabel(title);
+            titleLbl.setFont(new Font("Segoe UI", Font.BOLD, 15));
+            titleLbl.setForeground(COLOR_TEXT_PRIMARY);
+
+            statusLabel = new JLabel(initialMsg);
+            statusLabel.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+            statusLabel.setForeground(COLOR_TEXT_MUTED);
+
+            progressBar = new JProgressBar();
+            progressBar.setIndeterminate(true);
+            progressBar.setPreferredSize(new Dimension(420, 8));
+            progressBar.setForeground(accentColor != null ? accentColor : COLOR_AMBER);
+            progressBar.setBackground(COLOR_BG_INPUT);
+            progressBar.setBorderPainted(false);
+
+            JPanel center = new JPanel(new GridLayout(2, 1, 0, 8));
+            center.setOpaque(false);
+            center.add(statusLabel);
+            center.add(progressBar);
+
+            panel.add(titleLbl, BorderLayout.NORTH);
+            panel.add(center, BorderLayout.CENTER);
+
+            dialog.setContentPane(panel);
+        }
+
+        void showAsync() {
+            SwingUtilities.invokeLater(() -> dialog.setVisible(true));
+        }
+
+        void updateMessage(String msg) {
+            SwingUtilities.invokeLater(() -> {
+                String clean = msg.replace("[Starter Pack] ", "").replace("[Co-host Sync] ", "");
+                if (clean.length() > 60) {
+                    clean = clean.substring(0, 57) + "...";
+                }
+                statusLabel.setText(clean);
+            });
+        }
+
+        void close() {
+            SwingUtilities.invokeLater(() -> {
+                dialog.setVisible(false);
+                dialog.dispose();
+            });
         }
     }
 }
