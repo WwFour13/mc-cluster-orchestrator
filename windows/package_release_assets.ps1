@@ -93,12 +93,14 @@ try {
         Copy-Item -Path "$RootDir\minecraft-server\bukkit.yml" -Destination $targetWin -Force
     }
 
-    # Plugins (Pre-package ClusterGuard and PlayIt plugins if present)
+    # Plugins (Pre-package ClusterGuard fail-safe; exclude legacy PlayIt jar)
     if (Test-Path "$RootDir\minecraft-server\plugins") {
         $pluginsWin = Join-Path $targetWin "plugins"
         New-Item -ItemType Directory -Path $pluginsWin | Out-Null
         Get-ChildItem -Path "$RootDir\minecraft-server\plugins\*.jar" | ForEach-Object {
-            Copy-Item -Path $_.FullName -Destination $pluginsWin -Force
+            if ($_.Name -notlike "*playit*") {
+                Copy-Item -Path $_.FullName -Destination $pluginsWin -Force
+            }
         }
     }
 

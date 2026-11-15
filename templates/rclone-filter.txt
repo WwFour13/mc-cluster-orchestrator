@@ -38,5 +38,9 @@
 - /mac-linux/**
 - rclone-filter.txt
 
+# Exclude legacy Java PlayIt plugin artifacts
+- /plugins/*playit*
+- /plugins/playit-gg/**
+
 # Include everything else (world, plugins, configs, manifest.json)
 + /**

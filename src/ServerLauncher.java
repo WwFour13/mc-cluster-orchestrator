@@ -17,7 +17,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.5";
+    public static final String APP_VERSION = "2.1.6";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -471,11 +471,12 @@ public class ServerLauncher {
             }
 
             // Standalone Playit Sidecar Tunnel Daemon
+            purgeLegacyPlayitPlugin(rootDir);
             String playitBin = findPlayit(rootDir);
             if (playitBin != null) {
                 System.out.println("[Playit Sidecar] Starting standalone Playit tunnel agent (" + playitBin + ")...");
                 try {
-                    ProcessBuilder playitPb = new ProcessBuilder(playitBin, "run");
+                    ProcessBuilder playitPb = new ProcessBuilder(playitBin, "start");
                     playitPb.directory(rootDir.toFile());
                     playitPb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
                     playitPb.redirectError(ProcessBuilder.Redirect.INHERIT);
@@ -485,7 +486,7 @@ public class ServerLauncher {
                     System.err.println("[WARN] Failed to launch Playit sidecar: " + e.getMessage());
                 }
             } else {
-                System.out.println("[Playit] No standalone binary found in bin/. Falling back to in-game plugin.");
+                System.out.println("[Playit Sidecar] Notice: Standalone binary not found in bin/. Anycast tunnel skipped.");
             }
 
             // Check Java 25 requirement for PaperMC 26.3
@@ -614,7 +615,13 @@ public class ServerLauncher {
     public static void checkRemoteStopSignal(Path rootDir, String rclone, String b2Target, BufferedWriter mcStdin) {
         if (remoteStopTriggered.get()) return;
 
-        CommandResult res = runCommand(rootDir, rclone, "cat", b2Target + "/remote_stop.signal");
+        // Zero-Class-B check: verify existence via free Class A ListObjectsV2 before calling cat
+        CommandResult lsRes = runCommand(10, rootDir, rclone, "lsf", b2Target, "--files-only", "--include", "/remote_stop.signal", "--retries", "1");
+        if (lsRes.exitCode != 0 || lsRes.stdout == null || !lsRes.stdout.contains("remote_stop.signal")) {
+            return;
+        }
+
+        CommandResult res = runCommand(15, rootDir, rclone, "cat", b2Target + "/remote_stop.signal", "--retries", "1");
         if (res.exitCode == 0 && !res.stdout.isEmpty()) {
             if (remoteStopTriggered.compareAndSet(false, true)) {
                 String reason = extractJsonString(res.stdout, "reason");
@@ -676,7 +683,10 @@ public class ServerLauncher {
     }
 
     public static void cancelRemoteStop(Path rootDir, String rclone, String b2Target) {
-        runCommand(rootDir, rclone, "deletefile", b2Target + "/remote_stop.signal");
+        CommandResult lsRes = runCommand(10, rootDir, rclone, "lsf", b2Target, "--files-only", "--include", "/remote_stop.signal", "--retries", "1");
+        if (lsRes.exitCode == 0 && lsRes.stdout != null && lsRes.stdout.contains("remote_stop.signal")) {
+            runCommand(15, rootDir, rclone, "deletefile", b2Target + "/remote_stop.signal");
+        }
     }
 
     public static boolean pullFromB2(Path rootDir, String rclone, String b2Target, int staleMin, boolean force) {
@@ -741,8 +751,6 @@ public class ServerLauncher {
             }
         }
 
-        boolean forceChecksum = (cloudGen > localGen);
-
         System.out.printf("[B2 Sync] Pulling latest state from Backblaze B2 (Cloud Gen #%d vs Local Gen #%d)...%n", cloudGen, localGen);
         Path filterPath = rootDir.resolve("rclone-filter.txt");
         List<String> cmd = new ArrayList<>();
@@ -755,11 +763,6 @@ public class ServerLauncher {
             cmd.add(filterPath.toString());
         }
         cmd.add("--fast-list");
-        if (forceChecksum) {
-            // Anti-Timestamp Inversion: Ensure cloud chunks overwrite freshly extracted local files
-            cmd.add("--checksum");
-            System.out.println("[B2 Sync] Anti-Timestamp Inversion active (--checksum enforced).");
-        }
 
         CommandResult res = runCommand(rootDir, cmd.toArray(new String[0]));
         if (res.exitCode == 0) {
@@ -832,7 +835,12 @@ public class ServerLauncher {
     }
 
     public static CommandResult readCloudLock(Path rootDir, String rclone, String b2Target) {
-        return runCommand(15, rootDir, rclone, "cat", b2Target + "/cluster.lock");
+        // Zero-Class-B check: verify cluster.lock exists via free Class A ListObjectsV2 before calling cat
+        CommandResult lsRes = runCommand(10, rootDir, rclone, "lsf", b2Target, "--files-only", "--include", "/cluster.lock", "--retries", "1");
+        if (lsRes.exitCode != 0 || lsRes.stdout == null || !lsRes.stdout.contains("cluster.lock")) {
+            return new CommandResult(1, "", "Lock does not exist");
+        }
+        return runCommand(15, rootDir, rclone, "cat", b2Target + "/cluster.lock", "--retries", "1");
     }
 
     public static boolean isCloudLocked(Path rootDir, String rclone, String b2Target, int staleMin) {
@@ -926,7 +934,10 @@ public class ServerLauncher {
     }
 
     public static void releaseCloudLock(Path rootDir, String rclone, String b2Target) {
-        runCommand(15, rootDir, rclone, "deletefile", b2Target + "/cluster.lock");
+        CommandResult lsRes = runCommand(10, rootDir, rclone, "lsf", b2Target, "--files-only", "--include", "/cluster.lock", "--retries", "1");
+        if (lsRes.exitCode == 0 && lsRes.stdout != null && lsRes.stdout.contains("cluster.lock")) {
+            runCommand(15, rootDir, rclone, "deletefile", b2Target + "/cluster.lock");
+        }
     }
 
     public static CommandResult writeCloudHeartbeat(Path rootDir, String rclone, String b2Target, String host) {
@@ -1245,6 +1256,30 @@ public class ServerLauncher {
             }
         } catch (Exception ignored) {}
         return false;
+    }
+
+    public static void purgeLegacyPlayitPlugin(Path rootDir) {
+        Path pluginsDir = rootDir.resolve("plugins");
+        if (!Files.exists(pluginsDir) || !Files.isDirectory(pluginsDir)) return;
+        try (var stream = Files.list(pluginsDir)) {
+            stream.filter(p -> p.getFileName().toString().toLowerCase().contains("playit") && p.getFileName().toString().endsWith(".jar"))
+                    .forEach(jar -> {
+                        try {
+                            Files.deleteIfExists(jar);
+                            System.out.println("[Migration] Purged legacy PlayIt plugin jar: " + jar.getFileName());
+                        } catch (Exception ignored) {}
+                    });
+        } catch (Exception ignored) {}
+
+        Path playitDir = pluginsDir.resolve("playit-gg");
+        if (Files.exists(playitDir)) {
+            try (var walk = Files.walk(playitDir)) {
+                walk.sorted((a, b) -> b.compareTo(a)).forEach(p -> {
+                    try { Files.deleteIfExists(p); } catch (Exception ignored) {}
+                });
+                System.out.println("[Migration] Purged legacy PlayIt plugin configuration directory.");
+            } catch (Exception ignored) {}
+        }
     }
 
     public static void saveServerAddressToConfig(Path rootDir, String address) {
@@ -1722,6 +1757,14 @@ public class ServerLauncher {
 
     public static double estimateEgressMb(Path rootDir, String rclone, String b2Target) {
         if (b2Target == null || b2Target.isEmpty()) return 0.0;
+
+        // In-memory zero-egress short-circuit: If local generation matches cloud generation and world exists, egress is 0 MB
+        int localGen = readLocalGeneration(rootDir);
+        int cloudGen = readCloudGeneration(rootDir, rclone, b2Target);
+        if (localGen > 0 && cloudGen > 0 && localGen == cloudGen && !isWorldEmpty(rootDir)) {
+            return 0.0;
+        }
+
         Path filterPath = rootDir.resolve("rclone-filter.txt");
         List<String> cmd = new ArrayList<>();
         cmd.add(rclone);
@@ -1733,7 +1776,6 @@ public class ServerLauncher {
             cmd.add(filterPath.toString());
         }
         cmd.add("--fast-list");
-        cmd.add("--checksum");
         cmd.add("--dry-run");
 
         CommandResult res = runCommand(rootDir, cmd.toArray(new String[0]));
@@ -1898,6 +1940,11 @@ public class ServerLauncher {
                             os.write(buf, 0, read);
                         }
                     }
+                    if (entry.getTime() > 0) {
+                        try {
+                            Files.setLastModifiedTime(outPath, java.nio.file.attribute.FileTime.fromMillis(entry.getTime()));
+                        } catch (Exception ignored) {}
+                    }
                 }
                 zis.closeEntry();
             }
@@ -1991,6 +2038,11 @@ public class ServerLauncher {
                     }
                     byte[] data = baos.toByteArray();
                     Files.write(outPath, data);
+                    if (entry.getTime() > 0) {
+                        try {
+                            Files.setLastModifiedTime(outPath, java.nio.file.attribute.FileTime.fromMillis(entry.getTime()));
+                        } catch (Exception ignored) {}
+                    }
                     if ("manifest.json".equalsIgnoreCase(name)) {
                         try {
                             String mJson = new String(data, StandardCharsets.UTF_8);

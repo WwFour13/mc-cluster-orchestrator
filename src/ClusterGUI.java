@@ -141,6 +141,7 @@ public class ClusterGUI extends JFrame {
 
         initGitHubUpdatePolling();
         checkJava25OnStartup();
+        ServerLauncher.purgeLegacyPlayitPlugin(rootDir);
     }
 
     private boolean isConfigured() {
@@ -1991,11 +1992,12 @@ public class ClusterGUI extends JFrame {
                 }
 
                 // Playit Sidecar Daemon
+                ServerLauncher.purgeLegacyPlayitPlugin(rootDir);
                 String playitBin = ServerLauncher.findPlayit(rootDir);
                 if (playitBin != null) {
                     appendConsoleLog("[Playit Sidecar] Launching Anycast tunnel agent...");
                     try {
-                        ProcessBuilder pb = new ProcessBuilder(playitBin, "run");
+                        ProcessBuilder pb = new ProcessBuilder(playitBin, "start");
                         pb.directory(rootDir.toFile());
                         pb.redirectErrorStream(true);
                         activePlayitProcess = pb.start();
