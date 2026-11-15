@@ -9,25 +9,26 @@ echo ""
 GITHUB_REPO="WwFour13/mc-cluster-orchestrator"
 INSTALL_DIR="$HOME/minecraft-cluster"
 
-# 1. Java 21 Check & Auto-Install
-echo "[1/4] Verifying Java 21 runtime..."
+# 1. Java 25 Check & Auto-Install
+echo "[1/4] Verifying Java 25 runtime..."
 JAVA_VER=0
 if command -v java >/dev/null 2>&1; then
     JAVA_VER=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}' | awk -F '.' '{if ($1 == "1") print $2; else print $1}')
 fi
 
-if [ "$JAVA_VER" -lt 17 ] 2>/dev/null; then
-    echo "  [!] Java 17+ or 21+ required. Installing OpenJDK 21 via package manager..."
+if [ "$JAVA_VER" -lt 25 ] 2>/dev/null; then
+    echo "  [!] Java 25+ required for PaperMC 26.3. Installing OpenJDK 25 via package manager..."
     if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update && sudo apt-get install -y openjdk-21-jre-headless
+        sudo apt-get update && sudo apt-get install -y openjdk-25-jre-headless || sudo apt-get install -y openjdk-25-jdk
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y java-21-openjdk
+        sudo dnf install -y java-25-openjdk
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm jre21-openjdk
+        sudo pacman -Sy --noconfirm jre25-openjdk
     elif command -v zypper >/dev/null 2>&1; then
-        sudo zypper install -y java-21-openjdk
+        sudo zypper install -y java-25-openjdk
     else
-        echo "  [ERROR] Supported package manager not found. Please install OpenJDK 21 LTS manually."
+        echo "  [ERROR] Supported package manager not found. Please install OpenJDK 25 LTS manually from:"
+        echo "  https://adoptium.net/temurin/releases/?version=25"
         exit 1
     fi
 else

@@ -199,9 +199,9 @@ namespace MinecraftClusterInstaller
         {
             try
             {
-                // Step 1: Java 21 Check & Auto-Install
-                UpdateStatus("[1/4] Verifying Java 21 runtime...", 15);
-                EnsureJava21();
+                // Step 1: Java 25 Check & Auto-Install
+                UpdateStatus("[1/4] Verifying Java 25 runtime...", 15);
+                EnsureJava25();
 
                 // Step 2: Prepare Target Directory
                 UpdateStatus("[2/4] Preparing installation directory...", 35);
@@ -271,22 +271,22 @@ namespace MinecraftClusterInstaller
             }
         }
 
-        private void EnsureJava21()
+        private void EnsureJava25()
         {
             int javaMajor = GetInstalledJavaMajorVersion();
-            if (javaMajor >= 17)
+            if (javaMajor >= 25)
             {
                 UpdateStatus("[1/4] Detected compatible Java " + javaMajor + " LTS.", 25);
                 return;
             }
 
-            UpdateStatus("[1/4] Java 21 not found. Installing Eclipse Adoptium Temurin 21 via winget...", 20);
+            UpdateStatus("[1/4] Java 25 not found (Detected " + (javaMajor > 0 ? javaMajor.ToString() : "none") + "). Installing Eclipse Adoptium Temurin 25 via winget...", 20);
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = "winget",
-                    Arguments = "install EclipseAdoptium.Temurin.21.JDK -e --silent --accept-source-agreements --accept-package-agreements",
+                    Arguments = "install EclipseAdoptium.Temurin.25.JDK -e --silent --accept-source-agreements --accept-package-agreements",
                     CreateNoWindow = true,
                     UseShellExecute = false
                 };
@@ -299,8 +299,8 @@ namespace MinecraftClusterInstaller
             catch
             {
                 // Fallback to direct download page
-                Process.Start("https://adoptium.net/temurin/releases/?version=21");
-                MessageBox.Show("Please complete the Java 21 installation from your browser, then click OK.", "Java 21 Required", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Process.Start("https://adoptium.net/temurin/releases/?version=25");
+                MessageBox.Show("PaperMC 26.3 requires Java 25 LTS or higher.\nPlease complete the Java 25 installation from your browser, then click OK.", "Java 25 Required", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
 

@@ -465,6 +465,19 @@ public class ServerLauncher {
                 System.out.println("[Playit] No standalone binary found in bin/. Falling back to in-game plugin.");
             }
 
+            // Check Java 25 requirement for PaperMC 26.3
+            int jVer = Runtime.version().feature();
+            if (jVer < 25) {
+                System.err.println("\n========================================================");
+                System.err.printf("[JAVA ERROR] PaperMC 26.3 requires Java 25 or above! Current runtime: Java %d%n", jVer);
+                System.err.println("  Please install Eclipse Adoptium Temurin 25 LTS:");
+                System.err.println("  https://adoptium.net/temurin/releases/?version=25");
+                System.err.println("========================================================\n");
+                releaseCloudLock(rootDir, rclone, b2Target);
+                Files.deleteIfExists(lockPath);
+                return;
+            }
+
             // 6. Launch Server Process with Piped Console Forwarding
             System.out.printf("[5/6] Executing server runtime (%s heap allocation)...%n", javaMemory);
             // Ensure Mojang EULA is accepted
@@ -667,6 +680,7 @@ public class ServerLauncher {
 
         // Pre-Flight Egress Guard Calculation
         double estMb = estimateEgressMb(rootDir, rclone, b2Target);
+        System.out.printf("[B2 Sync] Cloud sync volume: %.1f MB estimated.%n", estMb);
         if (estMb > 0 && isWorldEmpty(rootDir)) {
             System.err.println("\n========================================================");
             System.err.printf("[EGRESS GUARD] Initial cloud download of %.1f MB blocked to preserve cluster daily quota.%n", estMb);
@@ -832,8 +846,13 @@ public class ServerLauncher {
     public record CloudGenerationResult(
             int generation,
             Status status,
-            String detailMessage
+            String detailMessage,
+            String minOrchestratorVersion
     ) {
+        public CloudGenerationResult(int generation, Status status, String detailMessage) {
+            this(generation, status, detailMessage, null);
+        }
+
         public enum Status {
             OK, FRESH_BUCKET, TIMEOUT, AUTH_ERROR, CLOCK_SKEW, NETWORK_ERROR, CORRUPT_JSON, QUOTA_EXCEEDED, ERROR
         }
@@ -900,8 +919,9 @@ public class ServerLauncher {
         CommandResult res = runCommand(15, rootDir, rclone, "cat", b2Target + "/manifest.json");
         if (res.exitCode == 0 && !res.stdout.isEmpty()) {
             int gen = extractJsonInt(res.stdout, "generation", -1);
+            String minVer = extractJsonString(res.stdout, "min_orchestrator_version");
             if (gen > 0) {
-                return new CloudGenerationResult(gen, CloudGenerationResult.Status.OK, "Verified Cloud Generation #" + gen);
+                return new CloudGenerationResult(gen, CloudGenerationResult.Status.OK, "Verified Cloud Generation #" + gen, minVer);
             } else {
                 return new CloudGenerationResult(-1, CloudGenerationResult.Status.CORRUPT_JSON, "Corrupted manifest.json in cloud (Missing 'generation' key)");
             }
@@ -958,11 +978,7 @@ public class ServerLauncher {
     }
 
     public static String readCloudMinVersion(Path rootDir, String rclone, String b2Target) {
-        CommandResult res = runCommand(15, rootDir, rclone, "cat", b2Target + "/manifest.json");
-        if (res.exitCode == 0 && !res.stdout.isEmpty()) {
-            return extractJsonString(res.stdout, "min_orchestrator_version");
-        }
-        return null;
+        return checkCloudGeneration(rootDir, rclone, b2Target).minOrchestratorVersion();
     }
 
     public static int compareVersions(String v1, String v2) {
@@ -1043,14 +1059,36 @@ public class ServerLauncher {
 
     public static String findPlayit(Path rootDir) {
         boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
-        Path localBin = rootDir.resolve("bin").resolve(isWindows ? "playit.exe" : "playit");
-        if (Files.exists(localBin)) {
-            return localBin.toAbsolutePath().toString();
-        }
+        String exeName = isWindows ? "playit.exe" : "playit";
+
+        // 1. rootDir/bin/playit.exe
+        Path p = rootDir.resolve("bin").resolve(exeName);
+        if (Files.exists(p)) return p.toAbsolutePath().toString();
+
+        // 2. rootDir/playit.exe
+        p = rootDir.resolve(exeName);
+        if (Files.exists(p)) return p.toAbsolutePath().toString();
+
+        // 3. rootDir/tools/playit.exe
+        p = rootDir.resolve("tools").resolve(exeName);
+        if (Files.exists(p)) return p.toAbsolutePath().toString();
+
+        // 4. jarDir/bin or jarDir root
+        try {
+            Path jarDir = getRunningJarPath().getParent();
+            if (jarDir != null) {
+                p = jarDir.resolve("bin").resolve(exeName);
+                if (Files.exists(p)) return p.toAbsolutePath().toString();
+                p = jarDir.resolve(exeName);
+                if (Files.exists(p)) return p.toAbsolutePath().toString();
+            }
+        } catch (Exception ignored) {}
+
+        // 5. System PATH via where/which
         String cmd = isWindows ? "where" : "which";
         try {
-            Process p = new ProcessBuilder(cmd, "playit").start();
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+            Process proc = new ProcessBuilder(cmd, "playit").start();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
                 String line = r.readLine();
                 if (line != null && !line.trim().isEmpty() && Files.exists(Paths.get(line.trim()))) {
                     return line.trim();
@@ -1062,7 +1100,19 @@ public class ServerLauncher {
 
     public static String resolvePlayitAddressFromToml(Path rootDir) {
         Path playitToml = rootDir.resolve("playit.toml");
-        if (!Files.exists(playitToml)) return null;
+        if (!Files.exists(playitToml)) {
+            playitToml = rootDir.resolve("bin").resolve("playit.toml");
+        }
+        if (!Files.exists(playitToml)) {
+            try {
+                Path jarDir = getRunningJarPath().getParent();
+                if (jarDir != null) {
+                    Path pj = jarDir.resolve("playit.toml");
+                    if (Files.exists(pj)) playitToml = pj;
+                }
+            } catch (Exception ignored) {}
+        }
+        if (playitToml == null || !Files.exists(playitToml)) return null;
         String playitBin = findPlayit(rootDir);
         if (playitBin == null) return null;
         try {
@@ -1206,7 +1256,7 @@ public class ServerLauncher {
         if (endpoint != null) endpoint = endpoint.trim();
 
         if (endpoint != null && !endpoint.isEmpty()) {
-            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s:%s/server",
+            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s,no_check_bucket=true:%s/server",
                     endpoint, keyId, appKey, bucket);
         }
         if (keyId != null && keyId.length() >= 3 && keyId.matches("^00[0-9].*")) {
@@ -1215,7 +1265,7 @@ public class ServerLauncher {
             if (cluster.equals("005")) region = "us-east-";
             else if (cluster.equals("003")) region = "eu-central-";
             String s3Endpoint = "s3." + region + cluster + ".backblazeb2.com";
-            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s:%s/server",
+            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s,no_check_bucket=true:%s/server",
                     s3Endpoint, keyId, appKey, bucket);
         }
         return String.format(":b2,account=\"%s\",key=\"%s\":%s/server", keyId, appKey, bucket);

@@ -819,49 +819,44 @@ public class ClusterGUI extends JFrame {
         return panel;
     }
 
+    private void updateAdminLabels(ServerLauncher.CloudGenerationResult cloudCheck, String bucket) {
+        if (adminGenLabel == null || adminCloudLabel == null || cloudCheck == null) return;
+        int localGen = ServerLauncher.readLocalGeneration(rootDir);
+        if (cloudCheck.status() == ServerLauncher.CloudGenerationResult.Status.OK) {
+            adminGenLabel.setText("Active World Generation: #" + cloudCheck.generation() + " (Local Base: #" + localGen + ")");
+            adminGenLabel.setForeground(COLOR_TEXT_PRIMARY);
+            adminGenLabel.setToolTipText("Cloud generation verified from Backblaze B2");
+            adminCloudLabel.setText("Cloud Provider: Backblaze B2 (" + (bucket != null ? bucket : "") + ") | Anti-Collision Active");
+            adminCloudLabel.setForeground(COLOR_TEXT_MUTED);
+        } else if (cloudCheck.status() == ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
+            adminGenLabel.setText("Active World Generation: #1 [Fresh Bucket] (Local Base: #" + localGen + ")");
+            adminGenLabel.setForeground(COLOR_BLUE);
+            adminGenLabel.setToolTipText("No remote manifest found; starting fresh generation");
+            adminCloudLabel.setText("Cloud Provider: Backblaze B2 (" + (bucket != null ? bucket : "") + ") | Initializing");
+            adminCloudLabel.setForeground(COLOR_TEXT_MUTED);
+        } else {
+            adminGenLabel.setText("Active World Generation: ⚠️ " + cloudCheck.status() + " (Local Base: #" + localGen + ")");
+            adminGenLabel.setForeground(COLOR_ROSE);
+            adminGenLabel.setToolTipText(cloudCheck.detailMessage());
+            adminCloudLabel.setText("Cloud Error: " + cloudCheck.detailMessage());
+            adminCloudLabel.setForeground(COLOR_ROSE);
+        }
+    }
+
     private void refreshAdminTabState() {
         generateAndDisplayInviteToken();
-        workerPool.submit(() -> {
+        if (lastCloudGenerationResult != null) {
+            Path cfg = rootDir.resolve("config.json");
+            String bucket = "";
             try {
-                Path cfg = rootDir.resolve("config.json");
-                if (!Files.exists(cfg)) return;
-                String json = Files.readString(cfg);
-                String bucket = ServerLauncher.extractJsonString(json, "b2_bucket");
-                String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
-                String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
-                String rclone = ServerLauncher.findRclone(rootDir);
-                String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
-                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
-
-                ServerLauncher.CloudGenerationResult cloudCheck = ServerLauncher.checkCloudGeneration(rootDir, rclone, b2Target);
-                this.lastCloudGenerationResult = cloudCheck;
-                int localGen = ServerLauncher.readLocalGeneration(rootDir);
-
-                SwingUtilities.invokeLater(() -> {
-                    updatePrimaryButtonState();
-                    if (cloudCheck.status() == ServerLauncher.CloudGenerationResult.Status.OK) {
-                        adminGenLabel.setText("Active World Generation: #" + cloudCheck.generation() + " (Local Base: #" + localGen + ")");
-                        adminGenLabel.setForeground(COLOR_TEXT_PRIMARY);
-                        adminGenLabel.setToolTipText("Cloud generation verified from Backblaze B2");
-                        adminCloudLabel.setText("Cloud Provider: Backblaze B2 (" + bucket + ") | Anti-Collision Active");
-                        adminCloudLabel.setForeground(COLOR_TEXT_MUTED);
-                    } else if (cloudCheck.status() == ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
-                        adminGenLabel.setText("Active World Generation: #1 [Fresh Bucket] (Local Base: #" + localGen + ")");
-                        adminGenLabel.setForeground(COLOR_BLUE);
-                        adminGenLabel.setToolTipText("No remote manifest found; starting fresh generation");
-                        adminCloudLabel.setText("Cloud Provider: Backblaze B2 (" + bucket + ") | Initializing");
-                        adminCloudLabel.setForeground(COLOR_TEXT_MUTED);
-                    } else {
-                        adminGenLabel.setText("Active World Generation: ⚠️ " + cloudCheck.status() + " (Local Base: #" + localGen + ")");
-                        adminGenLabel.setForeground(COLOR_ROSE);
-                        adminGenLabel.setToolTipText(cloudCheck.detailMessage());
-                        adminCloudLabel.setText("Cloud Error: " + cloudCheck.detailMessage());
-                        adminCloudLabel.setForeground(COLOR_ROSE);
-                        appendConsoleLog("[Cloud Status] " + cloudCheck.detailMessage());
-                    }
-                });
+                if (Files.exists(cfg)) {
+                    bucket = ServerLauncher.extractJsonString(Files.readString(cfg), "b2_bucket");
+                }
             } catch (Exception ignored) {}
-        });
+            updateAdminLabels(lastCloudGenerationResult, bucket);
+        } else {
+            refreshCloudLockStatus();
+        }
     }
 
     private void generateAndDisplayInviteToken() {
@@ -894,7 +889,7 @@ public class ClusterGUI extends JFrame {
             ClusterToken.ClusterConfig config = new ClusterToken.ClusterConfig(bucket, keyId, appKey, stale, bw, domain, tokenVal);
             String token = ClusterToken.encode(config);
             adminInviteKeyField.setText(token);
-            if (settingsTokenField != null) {
+            if (settingsTokenField != null && !settingsTokenField.hasFocus()) {
                 settingsTokenField.setText(token);
             }
         } catch (Exception ignored) {}
@@ -995,14 +990,13 @@ public class ClusterGUI extends JFrame {
                         if (cfg.bandwidthLimit() != null && !cfg.bandwidthLimit().isEmpty()) {
                             settingsBwLimitField.setText(cfg.bandwidthLimit());
                         }
-                        saveSettingsFromFieldsInternal(false);
-                        settingsTokenFeedbackLbl.setText("✔ Valid token saved! Connected to bucket: " + cfg.bucket());
+                        settingsTokenFeedbackLbl.setText("✔ Valid token detected: " + cfg.bucket() + " (Click 'Save Configuration' below to apply)");
                         settingsTokenFeedbackLbl.setForeground(COLOR_EMERALD);
                         return;
                     }
                 }
                 if (raw.isEmpty()) {
-                    settingsTokenFeedbackLbl.setText("Paste an mc-cluster:// invite token to instantly configure cluster credentials");
+                    settingsTokenFeedbackLbl.setText("Paste an mc-cluster:// invite token to configure cluster credentials");
                     settingsTokenFeedbackLbl.setForeground(COLOR_TEXT_MUTED);
                 } else {
                     settingsTokenFeedbackLbl.setText("✖ Invalid mc-cluster:// token format");
@@ -1159,10 +1153,10 @@ public class ClusterGUI extends JFrame {
                 int stale = ServerLauncher.extractJsonInt(json, "stale_timeout_minutes", 10);
                 ClusterToken.ClusterConfig config = new ClusterToken.ClusterConfig(bucket, keyId, appKey, stale, bw, domain, tokenVal);
                 String tokenStr = ClusterToken.encode(config);
-                if (settingsTokenField != null) {
+                if (settingsTokenField != null && !settingsTokenField.hasFocus()) {
                     settingsTokenField.setText(tokenStr);
                 }
-                if (settingsTokenFeedbackLbl != null) {
+                if (settingsTokenFeedbackLbl != null && !settingsTokenField.hasFocus()) {
                     settingsTokenFeedbackLbl.setText("✔ Active cluster token generated from configuration");
                     settingsTokenFeedbackLbl.setForeground(COLOR_EMERALD);
                 }
@@ -1192,6 +1186,24 @@ public class ClusterGUI extends JFrame {
             if (sAddr == null || sAddr.isEmpty()) {
                 sAddr = ServerLauncher.resolvePlayitAddressFromToml(rootDir);
             }
+            if (settingsTokenField != null) {
+                String tokenInput = settingsTokenField.getText().trim();
+                if (tokenInput.startsWith(ClusterToken.PREFIX)) {
+                    ClusterToken.ClusterConfig cfgFromToken = ClusterToken.decode(tokenInput);
+                    if (cfgFromToken != null && cfgFromToken.bucket() != null && !cfgFromToken.bucket().isEmpty()) {
+                        settingsBucketField.setText(cfgFromToken.bucket());
+                        settingsKeyIdField.setText(cfgFromToken.keyId());
+                        settingsAppKeyField.setText(cfgFromToken.appKey());
+                        if (cfgFromToken.bandwidthLimit() != null && !cfgFromToken.bandwidthLimit().isEmpty()) {
+                            settingsBwLimitField.setText(cfgFromToken.bandwidthLimit());
+                        }
+                        if (cfgFromToken.domain() != null && !cfgFromToken.domain().isEmpty()) {
+                            domain = cfgFromToken.domain().trim();
+                            sAddr = cfgFromToken.domain().trim();
+                        }
+                    }
+                }
+            }
             if ((domain == null || domain.isEmpty()) && sAddr != null && !sAddr.isEmpty()) {
                 domain = sAddr.trim();
             }
@@ -1220,7 +1232,6 @@ public class ClusterGUI extends JFrame {
             loadSettingsIntoFields();
             updatePrimaryButtonState();
             refreshCloudLockStatus();
-            refreshAdminTabState();
             if (showConfirmation) {
                 JOptionPane.showMessageDialog(this, "Configuration successfully saved!", "Settings Saved", JOptionPane.INFORMATION_MESSAGE);
             }
@@ -1860,6 +1871,7 @@ public class ClusterGUI extends JFrame {
                     updateMilestoneStep(2, "3. Synchronized (0 MB)", COLOR_EMERALD, 65);
                 } else {
                     double estMb = ServerLauncher.estimateEgressMb(rootDir, rclone, b2Target);
+                    appendConsoleLog(String.format("[B2 Sync] Cloud sync volume: %.1f MB estimated.", estMb));
                     if (estMb > 600.0 || (estMb > 0 && ServerLauncher.isWorldEmpty(rootDir))) {
                         ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
                         Files.deleteIfExists(lockPath);
@@ -1900,6 +1912,7 @@ public class ClusterGUI extends JFrame {
                                 "Launch has been halted to prevent hosting an out-of-sync local world.");
                         return;
                     }
+                    appendConsoleLog(String.format("[B2 Sync] Inbound synchronization completed (%.1f MB).", estMb));
                     updateMilestoneStep(2, "3. Synchronized", COLOR_EMERALD, 65);
                 }
 
@@ -1924,6 +1937,8 @@ public class ClusterGUI extends JFrame {
                     } catch (Exception e) {
                         appendConsoleLog("[WARN] PlayIt daemon launch warning: " + e.getMessage());
                     }
+                } else {
+                    appendConsoleLog("[Playit Sidecar] Notice: playit binary not found in bin/ or folder. Standalone tunnel skipped.");
                 }
 
                 // Dynamic DNS
@@ -1959,6 +1974,21 @@ public class ClusterGUI extends JFrame {
 
                 if (!Files.exists(coreDat)) {
                     abortLaunch("Server binary missing: bin/core.dat");
+                    return;
+                }
+
+                // Check Java 25 requirement for PaperMC 26.3
+                int jVer = Runtime.version().feature();
+                if (jVer < 25) {
+                    appendConsoleLog("[ERROR] PaperMC 26.3 requires Java 25 or above! Current runtime is Java " + jVer + ".");
+                    ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
+                    Files.deleteIfExists(lockPath);
+                    abortLaunch("JAVA 25 RUNTIME REQUIRED (LAUNCH BLOCKED)\n\n" +
+                            "PaperMC 26.3 requires Java 25 LTS or higher to host.\n" +
+                            "Current runtime detected: Java " + jVer + "\n\n" +
+                            "Please install Eclipse Adoptium Temurin 25 LTS:\n" +
+                            "https://adoptium.net/temurin/releases/?version=25\n\n" +
+                            "(Or run in terminal: winget install EclipseAdoptium.Temurin.25.JRE)");
                     return;
                 }
 
@@ -2166,9 +2196,9 @@ public class ClusterGUI extends JFrame {
                 String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
 
                 ServerLauncher.CommandResult catRes = ServerLauncher.readCloudLock(rootDir, rclone, b2Target);
-                String minCloudVer = ServerLauncher.readCloudMinVersion(rootDir, rclone, b2Target);
                 ServerLauncher.CloudGenerationResult genCheck = ServerLauncher.checkCloudGeneration(rootDir, rclone, b2Target);
                 this.lastCloudGenerationResult = genCheck;
+                String minCloudVer = genCheck.minOrchestratorVersion();
 
                 SwingUtilities.invokeLater(() -> {
                     if (minCloudVer != null && ServerLauncher.compareVersions(ServerLauncher.APP_VERSION, minCloudVer) < 0) {
@@ -2189,6 +2219,9 @@ public class ClusterGUI extends JFrame {
                     } else {
                         // Dual-Layer Tunnel Ping Guard: Probe the live server address directly
                         String sAddr = resolveDynamicServerAddress();
+                        if (ipAddressField != null && sAddr != null && !sAddr.isEmpty() && !sAddr.equals("Connecting...")) {
+                            ipAddressField.setText(sAddr);
+                        }
                         ServerLauncher.PingResult pr = ServerLauncher.pingMinecraftServer(sAddr);
                         if (pr.isOnline) {
                             statusBadge.setText(String.format("● Live on Tunnel (%d Online)", pr.onlinePlayers));
@@ -2198,6 +2231,7 @@ public class ClusterGUI extends JFrame {
                             statusBadge.setForeground(COLOR_EMERALD);
                         }
                     }
+                    updateAdminLabels(genCheck, bucket);
                     updatePrimaryButtonState();
                 });
             } catch (Exception e) {
@@ -2977,6 +3011,12 @@ public class ClusterGUI extends JFrame {
         try {
             Files.writeString(cfgPath, sb.toString());
             appendConsoleLog("[Config] Written new cluster configuration for bucket: " + cfg.bucket());
+            final String finalDomain = domain;
+            SwingUtilities.invokeLater(() -> {
+                if (ipAddressField != null && finalDomain != null && !finalDomain.isEmpty()) {
+                    ipAddressField.setText(finalDomain);
+                }
+            });
         } catch (IOException ex) {
             appendConsoleLog("[ERROR] Failed to save config.json: " + ex.getMessage());
         }

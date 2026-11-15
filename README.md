@@ -1,7 +1,7 @@
 # Minecraft Cluster Orchestrator (v2.1)
 
 [![Release](https://img.shields.io/badge/Release-v2.1.4-emerald.svg)](https://github.com/WwFour13/mc-cluster-orchestrator/releases)
-[![Java](https://img.shields.io/badge/Java-21%20LTS-blue.svg)](https://adoptium.net/temurin/releases/?version=21)
+[![Java](https://img.shields.io/badge/Java-25%20LTS-blue.svg)](https://adoptium.net/temurin/releases/?version=25)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-orange.svg)]()
 [![Cloud Sync](https://img.shields.io/badge/Cloud%20Sync-Backblaze%20B2%20OCC-purple.svg)]()
 [![Tunneling](https://img.shields.io/badge/Tunneling-Playit.gg%20Anycast-red.svg)]()
