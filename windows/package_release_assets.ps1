@@ -48,9 +48,15 @@ if ($LASTEXITCODE -eq 0 -and (Test-Path $outInstaller)) {
 }
 
 # 2b. Compile Internal Native Launcher (minecraft-server\MinecraftCluster.exe)
-& $csc /nologo /target:winexe /win32icon:"$iconPath" /out:"$outLauncher" /r:System.Windows.Forms.dll /r:System.Drawing.dll "$csLauncher"
-if ($LASTEXITCODE -eq 0 -and (Test-Path $outLauncher)) {
-    $launcherSize = [math]::Round((Get-Item $outLauncher).Length / 1KB, 1)
+$tempLauncher = Join-Path $env:TEMP "MinecraftCluster_build.exe"
+& $csc /nologo /target:winexe /win32icon:"$iconPath" /out:"$tempLauncher" /r:System.Windows.Forms.dll /r:System.Drawing.dll "$csLauncher"
+if ($LASTEXITCODE -eq 0 -and (Test-Path $tempLauncher)) {
+    try {
+        Copy-Item -Path $tempLauncher -Destination $outLauncher -Force -ErrorAction Stop
+    } catch {
+        Write-Host "  [NOTICE] MinecraftCluster.exe is currently running in background; using fresh build for staging." -ForegroundColor Yellow
+    }
+    $launcherSize = [math]::Round((Get-Item $tempLauncher).Length / 1KB, 1)
     Write-Host "  [OK] MinecraftCluster.exe compiled successfully ($launcherSize KB)" -ForegroundColor Green
 } else {
     Write-Host "[ERROR] Failed to compile MinecraftCluster.exe" -ForegroundColor Red
@@ -66,7 +72,8 @@ New-Item -ItemType Directory -Path $targetWin | Out-Null
 
 try {
     # Copy Native Launcher & ServerLauncher.jar
-    Copy-Item -Path "$RootDir\minecraft-server\MinecraftCluster.exe" -Destination $targetWin -Force
+    $launcherToCopy = if (Test-Path $tempLauncher) { $tempLauncher } else { $outLauncher }
+    Copy-Item -Path $launcherToCopy -Destination (Join-Path $targetWin "MinecraftCluster.exe") -Force
     Copy-Item -Path "$RootDir\minecraft-server\ServerLauncher.jar" -Destination $targetWin -Force
     if (Test-Path "$RootDir\templates\windows\LAUNCH_ORCHESTRATOR.bat") {
         Copy-Item -Path "$RootDir\templates\windows\LAUNCH_ORCHESTRATOR.bat" -Destination $targetWin -Force

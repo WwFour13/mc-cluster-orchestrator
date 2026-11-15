@@ -8,6 +8,7 @@ import java.awt.font.GlyphVector;
 import java.awt.geom.Rectangle2D;
 import java.io.*;
 import java.lang.management.ManagementFactory;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.concurrent.*;
@@ -62,6 +63,8 @@ public class ClusterGUI extends JFrame {
     private JLabel updateBannerText;
     private ModernButton updateDownloadBtn;
     private ModernCard unconfiguredBanner;
+    private ModernCard java25Banner;
+    private volatile String cachedJava25Bin = null;
 
     // Admin Governance Components
     private JLabel adminClusterHeaderLabel;
@@ -92,6 +95,14 @@ public class ClusterGUI extends JFrame {
     private ScheduledExecutorService heartbeatScheduler;
     private final ExecutorService workerPool = Executors.newCachedThreadPool();
     private volatile ServerLauncher.CloudGenerationResult lastCloudGenerationResult = null;
+    private volatile long lastCloudCheckTimestamp = 0L;
+    private static final long CLOUD_STATUS_TTL_MS = 60_000L;
+    private volatile String lastStatusBadgeText = null;
+    private volatile Color lastStatusBadgeColor = null;
+    private volatile String lastStatusBadgeTooltip = null;
+    private ModernButton refreshBtn;
+    private javax.swing.Timer refreshCooldownTimer = null;
+    private int refreshCooldownRemaining = 0;
 
     public ClusterGUI(Path rootDir) {
         this.clusterRegistry = ClusterRegistry.getInstance(rootDir);
@@ -122,12 +133,14 @@ public class ClusterGUI extends JFrame {
 
         if (isConfigured()) {
             masterLayout.show(masterContainer, "VIEW_MAIN_APP");
-            refreshCloudLockStatus();
+            invalidateCloudCache();
+            refreshCloudLockStatus(true);
         } else {
             masterLayout.show(masterContainer, "VIEW_ONBOARDING");
         }
 
         initGitHubUpdatePolling();
+        checkJava25OnStartup();
     }
 
     private boolean isConfigured() {
@@ -223,7 +236,7 @@ public class ClusterGUI extends JFrame {
         if ("TAB_ADMIN".equals(tabKey)) {
             refreshAdminTabState();
         } else if ("TAB_DASHBOARD".equals(tabKey)) {
-            refreshCloudLockStatus();
+            refreshCloudLockStatus(false);
         }
     }
 
@@ -278,9 +291,9 @@ public class ClusterGUI extends JFrame {
         statusBadge.setFont(new Font("Segoe UI", Font.BOLD, 13));
         statusBadge.setForeground(COLOR_TEXT_MUTED);
 
-        ModernButton refreshBtn = new ModernButton("⟳ Refresh", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 8);
-        refreshBtn.setPreferredSize(new Dimension(90, 30));
-        refreshBtn.addActionListener(e -> refreshCloudLockStatus());
+        this.refreshBtn = new ModernButton("⟳ Refresh", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 8);
+        refreshBtn.setPreferredSize(new Dimension(95, 30));
+        refreshBtn.addActionListener(e -> handleManualRefresh());
 
         radarBlock.add(statusBadge);
         radarBlock.add(refreshBtn);
@@ -425,12 +438,20 @@ public class ClusterGUI extends JFrame {
         // Bottom: Update Notification Banner
         updateBanner = buildUpdateBannerPanel();
 
-        // Top Section: Subheader + Unconfigured Warning Banner
+        // Top Section: Subheader + Warning Banners
         unconfiguredBanner = buildUnconfiguredBannerPanel();
+        java25Banner = buildJava25BannerPanel();
+        JPanel bannersBox = new JPanel();
+        bannersBox.setLayout(new BoxLayout(bannersBox, BoxLayout.Y_AXIS));
+        bannersBox.setOpaque(false);
+        bannersBox.add(unconfiguredBanner);
+        bannersBox.add(Box.createVerticalStrut(6));
+        bannersBox.add(java25Banner);
+
         JPanel topContainer = new JPanel(new BorderLayout(0, 8));
         topContainer.setOpaque(false);
         topContainer.add(subHeader, BorderLayout.NORTH);
-        topContainer.add(unconfiguredBanner, BorderLayout.SOUTH);
+        topContainer.add(bannersBox, BorderLayout.SOUTH);
 
         dashboard.add(topContainer, BorderLayout.NORTH);
         dashboard.add(center, BorderLayout.CENTER);
@@ -466,6 +487,44 @@ public class ClusterGUI extends JFrame {
         banner.add(left, BorderLayout.CENTER);
         banner.add(enterKeyBtn, BorderLayout.EAST);
         banner.setVisible(!isConfigured());
+        return banner;
+    }
+
+    private ModernCard buildJava25BannerPanel() {
+        ModernCard banner = new ModernCard(8);
+        banner.setCustomColors(new Color(38, 28, 14), new Color(180, 115, 20));
+        banner.setLayout(new BorderLayout(14, 0));
+        banner.setBorder(new EmptyBorder(8, 14, 8, 14));
+
+        JLabel iconLbl = new JLabel("☕");
+        iconLbl.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 16));
+
+        JLabel textLbl = new JLabel("<html><b>Java 25 LTS Required:</b> PaperMC 26.x requires Java 25 or higher to run.</html>");
+        textLbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        textLbl.setForeground(COLOR_AMBER);
+
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        left.setOpaque(false);
+        left.add(iconLbl);
+        left.add(textLbl);
+
+        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        right.setOpaque(false);
+
+        ModernButton setupBtn = new ModernButton("⚡  Install / Setup Java 25", COLOR_AMBER, Color.WHITE, 11, 6);
+        setupBtn.setPreferredSize(new Dimension(170, 30));
+        setupBtn.addActionListener(e -> showJava25SetupDialog());
+
+        ModernButton recheckBtn = new ModernButton("⟳  Re-Check", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
+        recheckBtn.setPreferredSize(new Dimension(95, 30));
+        recheckBtn.addActionListener(e -> recheckJava25(true));
+
+        right.add(setupBtn);
+        right.add(recheckBtn);
+
+        banner.add(left, BorderLayout.CENTER);
+        banner.add(right, BorderLayout.EAST);
+        banner.setVisible(false);
         return banner;
     }
 
@@ -855,7 +914,7 @@ public class ClusterGUI extends JFrame {
             } catch (Exception ignored) {}
             updateAdminLabels(lastCloudGenerationResult, bucket);
         } else {
-            refreshCloudLockStatus();
+            refreshCloudLockStatus(false);
         }
     }
 
@@ -1231,7 +1290,8 @@ public class ClusterGUI extends JFrame {
             generateAndDisplayInviteToken();
             loadSettingsIntoFields();
             updatePrimaryButtonState();
-            refreshCloudLockStatus();
+            invalidateCloudCache();
+            refreshCloudLockStatus(true);
             if (showConfirmation) {
                 JOptionPane.showMessageDialog(this, "Configuration successfully saved!", "Settings Saved", JOptionPane.INFORMATION_MESSAGE);
             }
@@ -1501,7 +1561,8 @@ public class ClusterGUI extends JFrame {
                                 "Cluster successfully initialized!\n\nHere is your Cluster Invite Token for co-hosts:\n" + token + "\n\n(Copied to your clipboard).",
                                 "Cluster Initialized", JOptionPane.INFORMATION_MESSAGE);
                         masterLayout.show(masterContainer, "VIEW_MAIN_APP");
-                        refreshCloudLockStatus();
+                        invalidateCloudCache();
+            refreshCloudLockStatus(true);
                     });
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
@@ -1675,7 +1736,8 @@ public class ClusterGUI extends JFrame {
             saveInitialConfig(bucket, keyId, appKey, host, "6G");
             masterLayout.show(masterContainer, "VIEW_MAIN_APP");
             updatePrimaryButtonState();
-            refreshCloudLockStatus();
+            invalidateCloudCache();
+            refreshCloudLockStatus(true);
         });
 
         footer.add(backBtn);
@@ -1720,6 +1782,10 @@ public class ClusterGUI extends JFrame {
                 showClusterTokenDialog();
                 return;
             }
+            if (cachedJava25Bin == null) {
+                showJava25SetupDialog();
+                return;
+            }
             launchServerSession();
         } else {
             terminateServerSession();
@@ -1735,6 +1801,12 @@ public class ClusterGUI extends JFrame {
                 primaryActionBtn.setBackgroundColor(COLOR_AMBER);
                 primaryActionBtn.setEnabled(true);
                 if (unconfiguredBanner != null) unconfiguredBanner.setVisible(true);
+            } else if (cachedJava25Bin == null) {
+                primaryActionBtn.setText("⚠️  JAVA 25 LTS REQUIRED");
+                primaryActionBtn.setBackgroundColor(COLOR_AMBER);
+                primaryActionBtn.setEnabled(true);
+                if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
+                if (java25Banner != null) java25Banner.setVisible(true);
             } else if (lastCloudGenerationResult != null &&
                        lastCloudGenerationResult.status() != ServerLauncher.CloudGenerationResult.Status.OK &&
                        lastCloudGenerationResult.status() != ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
@@ -1742,11 +1814,13 @@ public class ClusterGUI extends JFrame {
                 primaryActionBtn.setBackgroundColor(COLOR_AMBER);
                 primaryActionBtn.setEnabled(true);
                 if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
+                if (java25Banner != null) java25Banner.setVisible(false);
             } else {
                 primaryActionBtn.setText("▶  START CLUSTER SERVER");
                 primaryActionBtn.setBackgroundColor(COLOR_EMERALD);
                 primaryActionBtn.setEnabled(true);
                 if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
+                if (java25Banner != null) java25Banner.setVisible(false);
             }
         });
     }
@@ -1978,19 +2052,18 @@ public class ClusterGUI extends JFrame {
                 }
 
                 // Check Java 25 requirement for PaperMC 26.3
-                int jVer = Runtime.version().feature();
-                if (jVer < 25) {
-                    appendConsoleLog("[ERROR] PaperMC 26.3 requires Java 25 or above! Current runtime is Java " + jVer + ".");
+                String java25Bin = ServerLauncher.resolveJava25Binary();
+                if (java25Bin == null) {
+                    appendConsoleLog("[ERROR] PaperMC 26.3 requires Java 25 LTS or above! Current runtime is Java " + Runtime.version().feature() + ".");
                     ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
                     Files.deleteIfExists(lockPath);
+                    SwingUtilities.invokeLater(this::showJava25SetupDialog);
                     abortLaunch("JAVA 25 RUNTIME REQUIRED (LAUNCH BLOCKED)\n\n" +
                             "PaperMC 26.3 requires Java 25 LTS or higher to host.\n" +
-                            "Current runtime detected: Java " + jVer + "\n\n" +
-                            "Please install Eclipse Adoptium Temurin 25 LTS:\n" +
-                            "https://adoptium.net/temurin/releases/?version=25\n\n" +
-                            "(Or run in terminal: winget install EclipseAdoptium.Temurin.25.JRE)");
+                            "Please install Eclipse Adoptium Temurin 25 LTS via the setup dialog.");
                     return;
                 }
+                this.cachedJava25Bin = java25Bin;
 
                 // Ensure Mojang EULA is accepted
                 Path eulaFile = rootDir.resolve("eula.txt");
@@ -2002,7 +2075,7 @@ public class ClusterGUI extends JFrame {
                 } catch (Exception ignored) {}
 
                 ProcessBuilder mcPb = new ProcessBuilder(
-                        "java",
+                        java25Bin,
                         "-Dcluster.safe_launch=true",
                         "-Xms" + javaMemory,
                         "-Xmx" + javaMemory,
@@ -2082,7 +2155,8 @@ public class ClusterGUI extends JFrame {
             if (clusterSelector != null) clusterSelector.setEnabled(true);
             updatePrimaryButtonState();
             resetMilestones();
-            refreshCloudLockStatus();
+            invalidateCloudCache();
+            refreshCloudLockStatus(true);
             appendConsoleLog("[SUCCESS] Server stopped cleanly. Progress preserved in cloud.");
 
             int newGen = ServerLauncher.readLocalGeneration(rootDir);
@@ -2121,7 +2195,8 @@ public class ClusterGUI extends JFrame {
             if (clusterSelector != null) clusterSelector.setEnabled(true);
             updatePrimaryButtonState();
             resetMilestones();
-            refreshCloudLockStatus();
+            invalidateCloudCache();
+            refreshCloudLockStatus(true);
             JOptionPane.showMessageDialog(this, "Could not start server:\n" + reason, "Launch Aborted", JOptionPane.WARNING_MESSAGE);
         });
     }
@@ -2169,11 +2244,71 @@ public class ClusterGUI extends JFrame {
     // =========================================================================
     // Utility & Cloud Actions
     // =========================================================================
+    private void handleManualRefresh() {
+        if (refreshCooldownRemaining > 0) return;
+        refreshCooldownRemaining = 15;
+        if (refreshBtn != null) {
+            refreshBtn.setEnabled(false);
+            refreshBtn.setText("⟳ 15s");
+        }
+        if (refreshCooldownTimer != null && refreshCooldownTimer.isRunning()) {
+            refreshCooldownTimer.stop();
+        }
+        refreshCooldownTimer = new javax.swing.Timer(1000, ev -> {
+            refreshCooldownRemaining--;
+            if (refreshCooldownRemaining > 0) {
+                if (refreshBtn != null) {
+                    refreshBtn.setText("⟳ " + refreshCooldownRemaining + "s");
+                }
+            } else {
+                if (refreshCooldownTimer != null) {
+                    refreshCooldownTimer.stop();
+                }
+                if (refreshBtn != null) {
+                    refreshBtn.setEnabled(true);
+                    refreshBtn.setText("⟳ Refresh");
+                }
+            }
+        });
+        refreshCooldownTimer.start();
+        invalidateCloudCache();
+        refreshCloudLockStatus(true);
+    }
+
+    private void invalidateCloudCache() {
+        lastCloudCheckTimestamp = 0L;
+    }
+
     private void refreshCloudLockStatus() {
+        refreshCloudLockStatus(false);
+    }
+
+    private void refreshCloudLockStatus(boolean force) {
         if (!isConfigured()) {
             SwingUtilities.invokeLater(() -> {
                 statusBadge.setText("● Credentials Required");
                 statusBadge.setForeground(COLOR_AMBER);
+                updatePrimaryButtonState();
+            });
+            return;
+        }
+
+        long elapsed = System.currentTimeMillis() - lastCloudCheckTimestamp;
+        if (!force && elapsed < CLOUD_STATUS_TTL_MS && lastCloudGenerationResult != null) {
+            SwingUtilities.invokeLater(() -> {
+                if (lastStatusBadgeText != null) {
+                    statusBadge.setText(lastStatusBadgeText);
+                    statusBadge.setForeground(lastStatusBadgeColor);
+                    statusBadge.setToolTipText(lastStatusBadgeTooltip);
+                }
+                Path cfg = rootDir.resolve("config.json");
+                String bucket = "";
+                try {
+                    if (Files.exists(cfg)) {
+                        bucket = ServerLauncher.extractJsonString(Files.readString(cfg), "b2_bucket");
+                    }
+                } catch (Exception ignored) {}
+                updateAdminLabels(lastCloudGenerationResult, bucket);
                 updatePrimaryButtonState();
             });
             return;
@@ -2198,6 +2333,7 @@ public class ClusterGUI extends JFrame {
                 ServerLauncher.CommandResult catRes = ServerLauncher.readCloudLock(rootDir, rclone, b2Target);
                 ServerLauncher.CloudGenerationResult genCheck = ServerLauncher.checkCloudGeneration(rootDir, rclone, b2Target);
                 this.lastCloudGenerationResult = genCheck;
+                this.lastCloudCheckTimestamp = System.currentTimeMillis();
                 String minCloudVer = genCheck.minOrchestratorVersion();
 
                 SwingUtilities.invokeLater(() -> {
@@ -2231,6 +2367,9 @@ public class ClusterGUI extends JFrame {
                             statusBadge.setForeground(COLOR_EMERALD);
                         }
                     }
+                    lastStatusBadgeText = statusBadge.getText();
+                    lastStatusBadgeColor = statusBadge.getForeground();
+                    lastStatusBadgeTooltip = statusBadge.getToolTipText();
                     updateAdminLabels(genCheck, bucket);
                     updatePrimaryButtonState();
                 });
@@ -2345,7 +2484,8 @@ public class ClusterGUI extends JFrame {
 
                 ServerLauncher.dispatchRemoteStop(rootDir, rclone, b2Target, ServerLauncher.getHostName(), reason);
                 appendConsoleLog("[REMOTE STOP] Stop signal published to B2. Host will shut down in 30 seconds.");
-                refreshCloudLockStatus();
+                invalidateCloudCache();
+            refreshCloudLockStatus(true);
             } catch (Exception ex) {
                 appendConsoleLog("[ERROR] Failed to send remote stop: " + ex.getMessage());
             }
@@ -2375,7 +2515,8 @@ public class ClusterGUI extends JFrame {
                     ServerLauncher.cancelRemoteStop(rootDir, rclone, b2Target);
                 }
                 appendConsoleLog("[UNLOCK] Cluster lock released successfully.");
-                refreshCloudLockStatus();
+                invalidateCloudCache();
+            refreshCloudLockStatus(true);
             } catch (Exception ex) {
                 appendConsoleLog("[ERROR] Unlock failed: " + ex.getMessage());
             }
@@ -2686,7 +2827,8 @@ public class ClusterGUI extends JFrame {
                     hostSubtitle.setText("Host: " + ServerLauncher.getHostName() + " | Local Storage: " + rootDir.toString());
                     appendConsoleLog("[Cluster Switcher] Active cluster switched to: " + profile.name);
                     loadSettingsIntoFields();
-                    refreshCloudLockStatus();
+                    invalidateCloudCache();
+            refreshCloudLockStatus(true);
                     resetMilestones();
                     updatePrimaryButtonState();
                 } else {
@@ -2797,7 +2939,8 @@ public class ClusterGUI extends JFrame {
                             });
                             modal.close();
                             SwingUtilities.invokeLater(() -> {
-                                refreshCloudLockStatus();
+                                invalidateCloudCache();
+            refreshCloudLockStatus(true);
                                 resetMilestones();
                                 JOptionPane.showMessageDialog(this,
                                         "Active cluster successfully updated!\n\n" +
@@ -2868,7 +3011,8 @@ public class ClusterGUI extends JFrame {
                         refreshClusterSelectorItems();
                         hostSubtitle.setText("Host: " + ServerLauncher.getHostName() + " | Local Storage: " + rootDir.toString());
                         loadSettingsIntoFields();
-                        refreshCloudLockStatus();
+                        invalidateCloudCache();
+            refreshCloudLockStatus(true);
                         resetMilestones();
                         masterLayout.show(masterContainer, "VIEW_MAIN_APP");
                         updatePrimaryButtonState();
@@ -2982,6 +3126,217 @@ public class ClusterGUI extends JFrame {
         dialog.add(btnPanel, BorderLayout.SOUTH);
 
         dialog.setVisible(true);
+    }
+
+    private void checkJava25OnStartup() {
+        workerPool.submit(() -> {
+            String found = ServerLauncher.resolveJava25Binary();
+            this.cachedJava25Bin = found;
+            SwingUtilities.invokeLater(() -> {
+                if (found == null) {
+                    if (java25Banner != null) java25Banner.setVisible(true);
+                    updatePrimaryButtonState();
+                    showJava25SetupDialog();
+                } else {
+                    if (java25Banner != null) java25Banner.setVisible(false);
+                    updatePrimaryButtonState();
+                }
+            });
+        });
+    }
+
+    private void recheckJava25(boolean showMessage) {
+        workerPool.submit(() -> {
+            String found = ServerLauncher.resolveJava25Binary();
+            this.cachedJava25Bin = found;
+            SwingUtilities.invokeLater(() -> {
+                if (found != null) {
+                    if (java25Banner != null) java25Banner.setVisible(false);
+                    updatePrimaryButtonState();
+                    if (showMessage) {
+                        if (Runtime.version().feature() < 25) {
+                            int choice = JOptionPane.showConfirmDialog(this,
+                                    "✔ Java 25 LTS detected successfully!\n" +
+                                    "Binary: " + found + "\n\n" +
+                                    "Would you like to restart the launcher now to run natively under Java 25?",
+                                    "Java 25 Verified — Restart Recommended",
+                                    JOptionPane.YES_NO_OPTION,
+                                    JOptionPane.QUESTION_MESSAGE);
+                            if (choice == JOptionPane.YES_OPTION) {
+                                ServerLauncher.relaunchWithJava(found);
+                            }
+                        } else {
+                            JOptionPane.showMessageDialog(this,
+                                    "✔ Java 25 LTS detected successfully!\nPath: " + found + "\n\nServer hosting is now fully unlocked.",
+                                    "Java 25 Verified", JOptionPane.INFORMATION_MESSAGE);
+                        }
+                    }
+                } else {
+                    if (java25Banner != null) java25Banner.setVisible(true);
+                    updatePrimaryButtonState();
+                    if (showMessage) {
+                        JOptionPane.showMessageDialog(this,
+                                "Java 25 has not been detected yet.\nIf you just installed it, please wait a moment for the installer to finish, or restart the launcher.",
+                                "Not Detected Yet", JOptionPane.WARNING_MESSAGE);
+                    }
+                }
+            });
+        });
+    }
+
+    public void showJava25SetupDialog() {
+        JDialog dialog = new JDialog(this, "Java 25 LTS Runtime Required", false);
+        dialog.setSize(580, 390);
+        dialog.setLocationRelativeTo(this);
+        dialog.getContentPane().setBackground(COLOR_BG_DARK);
+        dialog.setLayout(new BorderLayout(0, 16));
+        ((JPanel) dialog.getContentPane()).setBorder(new EmptyBorder(22, 26, 22, 26));
+
+        // Header
+        JPanel headerPanel = new JPanel(new GridLayout(2, 1, 0, 6));
+        headerPanel.setOpaque(false);
+        JLabel titleLbl = new JLabel("☕  JAVA 25 LTS REQUIRED TO HOST");
+        titleLbl.setFont(new Font("Segoe UI", Font.BOLD, 16));
+        titleLbl.setForeground(COLOR_AMBER);
+
+        int currentVer = Runtime.version().feature();
+        JLabel descLbl = new JLabel(String.format(
+                "<html>PaperMC 26.3 mandates <b>Java 25 or above</b> to launch the Minecraft server engine.<br>" +
+                "Your current launcher runtime is <b>Java %d</b>.<br><br>" +
+                "Choose one of the options below to install Eclipse Adoptium Temurin 25 LTS:</html>",
+                currentVer));
+        descLbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        descLbl.setForeground(COLOR_TEXT_PRIMARY);
+        headerPanel.add(titleLbl);
+        headerPanel.add(descLbl);
+
+        // Body with options card
+        ModernCard optionsCard = new ModernCard(8);
+        optionsCard.setLayout(new GridLayout(2, 1, 0, 12));
+        optionsCard.setBorder(new EmptyBorder(14, 16, 14, 16));
+
+        // Option 1: Terminal Winget
+        JPanel opt1 = new JPanel(new BorderLayout(10, 0));
+        opt1.setOpaque(false);
+        JLabel opt1Lbl = new JLabel("<html><b>1. One-Click Automated Install (Recommended):</b><br><font color='#9ca3af'>Runs <code>winget install EclipseAdoptium.Temurin.25.JRE</code> in a visible terminal.</font></html>");
+        opt1Lbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        opt1Lbl.setForeground(COLOR_TEXT_PRIMARY);
+
+        ModernButton wingetBtn = new ModernButton("⚡  Install via Terminal", COLOR_BLUE, Color.WHITE, 12, 6);
+        wingetBtn.setPreferredSize(new Dimension(175, 34));
+        wingetBtn.addActionListener(e -> launchWingetJava25Install());
+        opt1.add(opt1Lbl, BorderLayout.CENTER);
+        opt1.add(wingetBtn, BorderLayout.EAST);
+
+        // Option 2: Browser Download Page
+        JPanel opt2 = new JPanel(new BorderLayout(10, 0));
+        opt2.setOpaque(false);
+        JLabel opt2Lbl = new JLabel("<html><b>2. Manual Web Download:</b><br><font color='#9ca3af'>Open the official Eclipse Adoptium Temurin 25 releases portal in your browser.</font></html>");
+        opt2Lbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        opt2Lbl.setForeground(COLOR_TEXT_PRIMARY);
+
+        ModernButton webBtn = new ModernButton("🌐  Open Download Page", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 6);
+        webBtn.setPreferredSize(new Dimension(175, 34));
+        webBtn.addActionListener(e -> openWebUrl("https://adoptium.net/temurin/releases/?version=25"));
+        opt2.add(opt2Lbl, BorderLayout.CENTER);
+        opt2.add(webBtn, BorderLayout.EAST);
+
+        optionsCard.add(opt1);
+        optionsCard.add(opt2);
+
+        // Footer buttons
+        JPanel footerPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+        footerPanel.setOpaque(false);
+
+        ModernButton recheckBtn = new ModernButton("⟳  Check Again", COLOR_EMERALD, Color.WHITE, 11, 6);
+        recheckBtn.setPreferredSize(new Dimension(120, 34));
+        recheckBtn.addActionListener(e -> {
+            String found = ServerLauncher.resolveJava25Binary();
+            if (found != null) {
+                this.cachedJava25Bin = found;
+                if (java25Banner != null) java25Banner.setVisible(false);
+                updatePrimaryButtonState();
+                dialog.dispose();
+                if (Runtime.version().feature() < 25) {
+                    int choice = JOptionPane.showConfirmDialog(this,
+                            "✔ Java 25 LTS detected successfully!\n" +
+                            "Binary: " + found + "\n\n" +
+                            "Would you like to restart the launcher now to run natively under Java 25?",
+                            "Java 25 Verified — Restart Recommended",
+                            JOptionPane.YES_NO_OPTION,
+                            JOptionPane.QUESTION_MESSAGE);
+                    if (choice == JOptionPane.YES_OPTION) {
+                        ServerLauncher.relaunchWithJava(found);
+                    }
+                } else {
+                    JOptionPane.showMessageDialog(this,
+                            "✔ Java 25 LTS detected successfully!\nPath: " + found + "\n\nServer hosting is now fully unlocked.",
+                            "Java 25 Verified", JOptionPane.INFORMATION_MESSAGE);
+                }
+            } else {
+                JOptionPane.showMessageDialog(dialog,
+                        "Java 25 has not been detected yet.\nIf you just installed it, please wait a moment for the installer to finish, or restart the launcher.",
+                        "Not Detected Yet", JOptionPane.WARNING_MESSAGE);
+            }
+        });
+
+        ModernButton dismissBtn = new ModernButton("Continue to Launcher", COLOR_BG_CARD, COLOR_TEXT_MUTED, 11, 6);
+        dismissBtn.setPreferredSize(new Dimension(150, 34));
+        dismissBtn.addActionListener(e -> dialog.dispose());
+
+        footerPanel.add(dismissBtn);
+        footerPanel.add(recheckBtn);
+
+        dialog.add(headerPanel, BorderLayout.NORTH);
+        dialog.add(optionsCard, BorderLayout.CENTER);
+        dialog.add(footerPanel, BorderLayout.SOUTH);
+
+        dialog.setVisible(true);
+    }
+
+    private void launchWingetJava25Install() {
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+        if (!isWindows) {
+            openWebUrl("https://adoptium.net/temurin/releases/?version=25");
+            return;
+        }
+
+        try {
+            Process check = new ProcessBuilder("where", "winget").start();
+            if (check.waitFor() != 0) {
+                JOptionPane.showMessageDialog(this,
+                        "The 'winget' package manager was not found on your system.\nOpening the Adoptium web portal instead.",
+                        "Winget Missing", JOptionPane.INFORMATION_MESSAGE);
+                openWebUrl("https://adoptium.net/temurin/releases/?version=25");
+                return;
+            }
+
+            String batchCommands = "echo ======================================================== && " +
+                    "echo [MC Cluster] Installing Eclipse Adoptium Temurin 25 LTS... && " +
+                    "echo ======================================================== && " +
+                    "winget install EclipseAdoptium.Temurin.25.JRE --accept-source-agreements --accept-package-agreements && " +
+                    "echo. && echo [SUCCESS] Java 25 installed! Return to the launcher and click 'Check Again'. && pause";
+            new ProcessBuilder("cmd.exe", "/c", "start", "Installing Eclipse Adoptium Temurin 25 LTS", "cmd.exe", "/k", batchCommands).start();
+            appendConsoleLog("[Java 25 Setup] Terminal installer initiated via winget.");
+        } catch (Exception ex) {
+            appendConsoleLog("[ERROR] Failed to launch winget: " + ex.getMessage());
+            openWebUrl("https://adoptium.net/temurin/releases/?version=25");
+        }
+    }
+
+    private void openWebUrl(String url) {
+        try {
+            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+                Desktop.getDesktop().browse(new URI(url));
+            } else {
+                boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+                if (isWindows) {
+                    new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", url).start();
+                }
+            }
+        } catch (Exception ex) {
+            appendConsoleLog("[ERROR] Failed to open URL: " + ex.getMessage());
+        }
     }
 
     private void saveConfigFromToken(ClusterToken.ClusterConfig cfg) {

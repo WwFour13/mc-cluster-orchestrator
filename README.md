@@ -1,11 +1,16 @@
 # Minecraft Cluster Orchestrator (v2.1)
 
-[![Release](https://img.shields.io/badge/Release-v2.1.4-emerald.svg)](https://github.com/WwFour13/mc-cluster-orchestrator/releases)
+[![Release](https://img.shields.io/badge/Release-v2.1.5-emerald.svg)](https://github.com/WwFour13/mc-cluster-orchestrator/releases)
+[![Status](https://img.shields.io/badge/Status-Active_Beta-orange.svg)](https://github.com/WwFour13/mc-cluster-orchestrator/releases)
 [![Java](https://img.shields.io/badge/Java-25%20LTS-blue.svg)](https://adoptium.net/temurin/releases/?version=25)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-orange.svg)]()
 [![Cloud Sync](https://img.shields.io/badge/Cloud%20Sync-Backblaze%20B2%20OCC-purple.svg)]()
 [![Tunneling](https://img.shields.io/badge/Tunneling-Playit.gg%20Anycast-red.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)]()
+
+> [!IMPORTANT]
+> ### 🚧 Active Beta Notice
+> The Minecraft Cluster Orchestrator is currently in **Active Beta**. Cloud synchronization protocols, rate-limiting guards, and co-host handoff routines are undergoing rapid field testing and optimization. Incremental patches are released regularly as edge cases are resolved.
 
 A distributed, fail-safe Minecraft server orchestrator. Coordinates 24/7 multiplayer hosting across multiple friends' PCs with **zero server rental costs**, **zero player VPNs** (no Hamachi, Radmin, or port forwarding required), and optimistic concurrency cloud synchronization using a free Backblaze B2 bucket.
 
@@ -96,7 +101,7 @@ The orchestrator includes a native dark-themed desktop application built with Ja
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ MINECRAFT CLUSTER v2.1.4      [ Dashboard ]  [ Cluster Admin ]  [ Settings ]│
+│ MINECRAFT CLUSTER v2.1.5      [ Dashboard ]  [ Cluster Admin ]  [ Settings ]│
 ├────────────────────────────────────────────────────────────────────────┤
 │                                                                        │
 │ Dorm Craft SMP — Shared Cluster                       ● Active on MSI  │

@@ -17,7 +17,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.4";
+    public static final String APP_VERSION = "2.1.5";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -69,6 +69,29 @@ public class ServerLauncher {
         } catch (Exception e) {
             e.printStackTrace();
             System.exit(100);
+        }
+    }
+
+    public static void relaunchWithJava(String javaBinary) {
+        Path jarPath = getRunningJarPath();
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+        try {
+            Path parentDir = jarPath.getParent() != null ? jarPath.getParent() : Paths.get("").toAbsolutePath();
+            String bin = (javaBinary != null && !javaBinary.isEmpty()) ? javaBinary : "java";
+            if (isWindows) {
+                String javaw = bin.toLowerCase().endsWith("java.exe") ? bin.substring(0, bin.length() - 8) + "javaw.exe" : bin;
+                String launchBin = Files.exists(Paths.get(javaw)) ? javaw : bin;
+                new ProcessBuilder("cmd.exe", "/c", "start", "\"\"", launchBin, "-jar", jarPath.toAbsolutePath().toString())
+                        .directory(parentDir.toFile())
+                        .start();
+            } else {
+                new ProcessBuilder("sh", "-c", "nohup \"" + bin + "\" -jar \"" + jarPath.toAbsolutePath() + "\" >/dev/null 2>&1 &")
+                        .directory(parentDir.toFile())
+                        .start();
+            }
+            System.exit(0);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 
@@ -466,10 +489,10 @@ public class ServerLauncher {
             }
 
             // Check Java 25 requirement for PaperMC 26.3
-            int jVer = Runtime.version().feature();
-            if (jVer < 25) {
+            String java25Bin = resolveJava25Binary();
+            if (java25Bin == null) {
                 System.err.println("\n========================================================");
-                System.err.printf("[JAVA ERROR] PaperMC 26.3 requires Java 25 or above! Current runtime: Java %d%n", jVer);
+                System.err.printf("[JAVA ERROR] PaperMC 26.3 requires Java 25 or above! Current runtime: Java %d%n", Runtime.version().feature());
                 System.err.println("  Please install Eclipse Adoptium Temurin 25 LTS:");
                 System.err.println("  https://adoptium.net/temurin/releases/?version=25");
                 System.err.println("========================================================\n");
@@ -479,7 +502,7 @@ public class ServerLauncher {
             }
 
             // 6. Launch Server Process with Piped Console Forwarding
-            System.out.printf("[5/6] Executing server runtime (%s heap allocation)...%n", javaMemory);
+            System.out.printf("[5/6] Executing server runtime (%s heap allocation, engine: %s)...%n", javaMemory, java25Bin);
             // Ensure Mojang EULA is accepted
             Path eulaFile = rootDir.resolve("eula.txt");
             try {
@@ -490,7 +513,7 @@ public class ServerLauncher {
             } catch (Exception ignored) {}
 
             ProcessBuilder pb = new ProcessBuilder(
-                    "java",
+                    java25Bin,
                     "-Dcluster.safe_launch=true",
                     "-Xms" + javaMemory,
                     "-Xmx" + javaMemory,
@@ -1128,6 +1151,100 @@ public class ServerLauncher {
             }
         } catch (Exception ignored) {}
         return null;
+    }
+
+    public static String resolveJava25Binary() {
+        // 1. Check if current JVM is already Java 25+
+        if (Runtime.version().feature() >= 25) {
+            return "java";
+        }
+
+        boolean isWin = System.getProperty("os.name").toLowerCase().contains("win");
+        boolean isMac = System.getProperty("os.name").toLowerCase().contains("mac");
+
+        List<Path> candidatePaths = new ArrayList<>();
+
+        if (isWin) {
+            String[] baseDirs = new String[]{
+                    "C:\\Program Files\\Eclipse Adoptium",
+                    "C:\\Program Files\\Java",
+                    "C:\\Program Files\\Microsoft",
+                    System.getenv("LOCALAPPDATA") != null ? System.getenv("LOCALAPPDATA") + "\\Programs\\Eclipse Adoptium" : null
+            };
+            for (String base : baseDirs) {
+                if (base == null) continue;
+                Path bPath = Paths.get(base);
+                if (Files.exists(bPath) && Files.isDirectory(bPath)) {
+                    try (var stream = Files.list(bPath)) {
+                        stream.filter(Files::isDirectory).forEach(sub -> {
+                            String name = sub.getFileName().toString().toLowerCase();
+                            if (name.contains("25")) {
+                                Path exe = sub.resolve("bin").resolve("java.exe");
+                                if (Files.exists(exe)) {
+                                    candidatePaths.add(exe);
+                                }
+                            }
+                        });
+                    } catch (Exception ignored) {}
+                }
+            }
+        } else if (isMac) {
+            Path macJvm = Paths.get("/Library/Java/JavaVirtualMachines");
+            if (Files.exists(macJvm)) {
+                try (var stream = Files.list(macJvm)) {
+                    stream.filter(Files::isDirectory).forEach(sub -> {
+                        if (sub.getFileName().toString().contains("25")) {
+                            Path bin = sub.resolve("Contents/Home/bin/java");
+                            if (Files.exists(bin)) candidatePaths.add(bin);
+                        }
+                    });
+                } catch (Exception ignored) {}
+            }
+        } else {
+            Path linuxJvm = Paths.get("/usr/lib/jvm");
+            if (Files.exists(linuxJvm)) {
+                try (var stream = Files.list(linuxJvm)) {
+                    stream.filter(Files::isDirectory).forEach(sub -> {
+                        if (sub.getFileName().toString().contains("25")) {
+                            Path bin = sub.resolve("bin/java");
+                            if (Files.exists(bin)) candidatePaths.add(bin);
+                        }
+                    });
+                } catch (Exception ignored) {}
+            }
+        }
+
+        // Test each candidate path
+        for (Path p : candidatePaths) {
+            if (isJavaVersionAtLeast(p.toAbsolutePath().toString(), 25)) {
+                return p.toAbsolutePath().toString();
+            }
+        }
+
+        // Check if "java" command on PATH is Java 25
+        if (isJavaVersionAtLeast("java", 25)) {
+            return "java";
+        }
+
+        return null;
+    }
+
+    public static boolean isJavaVersionAtLeast(String javaCmd, int minFeature) {
+        try {
+            Process p = new ProcessBuilder(javaCmd, "-version").start();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getErrorStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    Pattern pat = Pattern.compile("version\\s+\"?([0-9]+)");
+                    Matcher m = pat.matcher(line);
+                    if (m.find()) {
+                        int ver = Integer.parseInt(m.group(1));
+                        if (ver >= minFeature) return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     public static void saveServerAddressToConfig(Path rootDir, String address) {
