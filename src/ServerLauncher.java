@@ -9,6 +9,7 @@ import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -17,7 +18,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.6";
+    public static final String APP_VERSION = "2.1.7";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -290,7 +291,10 @@ public class ServerLauncher {
                         if (statusAddr != null && !statusAddr.isEmpty()) {
                             PingResult pr = pingMinecraftServer(statusAddr);
                             if (pr.isOnline) {
-                                System.out.printf("Public Tunnel Ping (%s): LIVE (%d/%d online | MOTD: %s)%n", statusAddr, pr.onlinePlayers, pr.maxPlayers, pr.motd);
+                                System.out.printf("Public Tunnel Ping (%s): LIVE (%d/%d online | %dms | MOTD: %s)%n", statusAddr, pr.onlinePlayers, pr.maxPlayers, pr.latencyMs, pr.motd);
+                                if (!pr.playerSample.isEmpty()) {
+                                    System.out.println("  Players: " + String.join(", ", pr.playerSample));
+                                }
                             } else {
                                 System.out.printf("Public Tunnel Ping (%s): OFFLINE%n", statusAddr);
                             }
@@ -350,7 +354,10 @@ public class ServerLauncher {
                 if (pr.isOnline) {
                     System.out.println("\n========================================================");
                     System.out.printf("[COLLISION GUARD] Active Minecraft session detected on tunnel '%s'!%n", targetServerAddr);
-                    System.out.printf("  Online Players: %d/%d | MOTD: %s%n", pr.onlinePlayers, pr.maxPlayers, pr.motd);
+                    System.out.printf("  Online Players: %d/%d (%dms) | MOTD: %s%n", pr.onlinePlayers, pr.maxPlayers, pr.latencyMs, pr.motd);
+                    if (!pr.playerSample.isEmpty()) {
+                        System.out.println("  Players: " + String.join(", ", pr.playerSample));
+                    }
                     System.out.println("  Launch aborted to prevent split-brain session conflict and data corruption.");
                     System.out.println("  Please join the active session directly!");
                     System.out.println("========================================================\n");
@@ -1558,18 +1565,47 @@ public class ServerLauncher {
         public final int maxPlayers;
         public final String motd;
         public final String version;
+        public final long latencyMs;
+        public final List<String> playerSample;
 
-        public PingResult(boolean isOnline, int onlinePlayers, int maxPlayers, String motd, String version) {
+        public PingResult(boolean isOnline, int onlinePlayers, int maxPlayers, String motd, String version, long latencyMs, List<String> playerSample) {
             this.isOnline = isOnline;
             this.onlinePlayers = onlinePlayers;
             this.maxPlayers = maxPlayers;
             this.motd = motd;
             this.version = version;
+            this.latencyMs = latencyMs;
+            this.playerSample = playerSample != null ? Collections.unmodifiableList(playerSample) : Collections.emptyList();
+        }
+
+        public PingResult(boolean isOnline, int onlinePlayers, int maxPlayers, String motd, String version) {
+            this(isOnline, onlinePlayers, maxPlayers, motd, version, -1, Collections.emptyList());
         }
 
         public static PingResult offline() {
-            return new PingResult(false, 0, 0, "", "");
+            return new PingResult(false, 0, 0, "", "", -1, Collections.emptyList());
         }
+    }
+
+    public static List<String> extractPlayerSample(String json) {
+        List<String> players = new ArrayList<>();
+        if (json == null || json.isEmpty()) return players;
+        int sampleIdx = json.indexOf("\"sample\"");
+        if (sampleIdx != -1) {
+            int startBracket = json.indexOf('[', sampleIdx);
+            int endBracket = json.indexOf(']', startBracket);
+            if (startBracket != -1 && endBracket != -1 && endBracket > startBracket) {
+                String sampleArray = json.substring(startBracket, endBracket + 1);
+                Matcher m = Pattern.compile("\"name\"\\s*:\\s*\"([^\"]+)\"").matcher(sampleArray);
+                while (m.find()) {
+                    String name = m.group(1).trim();
+                    if (!name.isEmpty() && !players.contains(name)) {
+                        players.add(name);
+                    }
+                }
+            }
+        }
+        return players;
     }
 
     public static PingResult pingMinecraftServer(String fullAddress) {
@@ -1584,6 +1620,7 @@ public class ServerLauncher {
             } catch (Exception ignored) {}
         }
 
+        long startTime = System.currentTimeMillis();
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(host, port), 2500);
             socket.setSoTimeout(2500);
@@ -1617,14 +1654,17 @@ public class ServerLauncher {
             int jsonLength = readVarInt(in);
 
             byte[] jsonBytes = in.readNBytes(jsonLength);
+            long latencyMs = Math.max(1, System.currentTimeMillis() - startTime);
             String json = new String(jsonBytes, StandardCharsets.UTF_8);
 
             int online = extractJsonInt(json, "online", 0);
             int max = extractJsonInt(json, "max", 20);
             String motd = extractJsonString(json, "description");
+            if (motd.isEmpty()) motd = extractJsonString(json, "text");
             String version = extractJsonString(json, "name");
+            List<String> playerSample = extractPlayerSample(json);
 
-            return new PingResult(true, online, max, motd, version);
+            return new PingResult(true, online, max, motd, version, latencyMs, playerSample);
         } catch (Exception e) {
             return PingResult.offline();
         }

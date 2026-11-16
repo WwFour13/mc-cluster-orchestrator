@@ -46,6 +46,9 @@ public class ClusterGUI extends JFrame {
 
     // Dashboard View Components
     private JLabel statusBadge;
+    private JLabel playerRadarBadge;
+    private JLabel latencyRadarBadge;
+    private javax.swing.Timer liveRadarTimer;
     private JLabel hostSubtitle;
     private JTextField ipAddressField;
     private ModernButton copyIpBtn;
@@ -142,6 +145,7 @@ public class ClusterGUI extends JFrame {
         initGitHubUpdatePolling();
         checkJava25OnStartup();
         ServerLauncher.purgeLegacyPlayitPlugin(rootDir);
+        initLiveRadarPolling();
     }
 
     private boolean isConfigured() {
@@ -286,17 +290,29 @@ public class ClusterGUI extends JFrame {
         hostInfo.add(clusterRow);
         hostInfo.add(hostSubtitle);
 
-        JPanel radarBlock = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+        JPanel radarBlock = new JPanel(new FlowLayout(FlowLayout.RIGHT, 12, 0));
         radarBlock.setOpaque(false);
         statusBadge = new JLabel("● Checking Cluster Availability...");
         statusBadge.setFont(new Font("Segoe UI", Font.BOLD, 13));
         statusBadge.setForeground(COLOR_TEXT_MUTED);
+
+        playerRadarBadge = new JLabel("👥 Offline");
+        playerRadarBadge.setFont(new Font("Segoe UI Emoji", Font.BOLD, 13));
+        playerRadarBadge.setForeground(COLOR_TEXT_MUTED);
+        playerRadarBadge.setToolTipText("Probing server status...");
+
+        latencyRadarBadge = new JLabel("⚡ --ms");
+        latencyRadarBadge.setFont(new Font("Segoe UI Emoji", Font.BOLD, 12));
+        latencyRadarBadge.setForeground(COLOR_TEXT_MUTED);
+        latencyRadarBadge.setVisible(false);
 
         this.refreshBtn = new ModernButton("⟳ Refresh", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 8);
         refreshBtn.setPreferredSize(new Dimension(95, 30));
         refreshBtn.addActionListener(e -> handleManualRefresh());
 
         radarBlock.add(statusBadge);
+        radarBlock.add(playerRadarBadge);
+        radarBlock.add(latencyRadarBadge);
         radarBlock.add(refreshBtn);
 
         subHeader.add(hostInfo, BorderLayout.WEST);
@@ -1898,11 +1914,11 @@ public class ClusterGUI extends JFrame {
                 String sAddr = resolveDynamicServerAddress();
                 ServerLauncher.PingResult pingRes = ServerLauncher.pingMinecraftServer(sAddr);
                 if (pingRes.isOnline) {
-                    appendConsoleLog(String.format("[COLLISION GUARD] Active Minecraft session detected on tunnel '%s' (%d players online)!", sAddr, pingRes.onlinePlayers));
+                    appendConsoleLog(String.format("[COLLISION GUARD] Active Minecraft session detected on tunnel '%s' (%d players online, %dms)!", sAddr, pingRes.onlinePlayers, pingRes.latencyMs));
                     abortLaunch(String.format("ACTIVE MINECRAFT SESSION DETECTED ON TUNNEL!\n\n" +
-                            "Endpoint: %s\nPlayers Online: %d/%d\nMOTD: %s\n\n" +
+                            "Endpoint: %s\nPlayers Online: %d/%d (%dms)\nMOTD: %s\n\n" +
                             "Launch blocked to prevent session conflict and world corruption.\n" +
-                            "Please connect directly to the active server!", sAddr, pingRes.onlinePlayers, pingRes.maxPlayers, pingRes.motd));
+                            "Please connect directly to the active server!", sAddr, pingRes.onlinePlayers, pingRes.maxPlayers, pingRes.latencyMs, pingRes.motd));
                     return;
                 }
 
@@ -2107,6 +2123,7 @@ public class ClusterGUI extends JFrame {
                         if (line.contains("Done (") && line.contains("For help, type")) {
                             updateMilestoneStep(3, "4. Boot Complete", COLOR_EMERALD, 90);
                             updateMilestoneStep(4, "5. SERVER ONLINE", COLOR_EMERALD, 100);
+                            refreshLiveRadarAsync();
                         }
                     }
                 }
@@ -2159,6 +2176,7 @@ public class ClusterGUI extends JFrame {
             resetMilestones();
             invalidateCloudCache();
             refreshCloudLockStatus(true);
+            refreshLiveRadarAsync();
             appendConsoleLog("[SUCCESS] Server stopped cleanly. Progress preserved in cloud.");
 
             int newGen = ServerLauncher.readLocalGeneration(rootDir);
@@ -2274,6 +2292,7 @@ public class ClusterGUI extends JFrame {
         });
         refreshCooldownTimer.start();
         invalidateCloudCache();
+        refreshLiveRadarAsync();
         refreshCloudLockStatus(true);
     }
 
@@ -2354,6 +2373,10 @@ public class ClusterGUI extends JFrame {
                         String activeHost = ServerLauncher.extractJsonString(catRes.stdout(), "host");
                         statusBadge.setText("● Active on " + (activeHost != null ? activeHost : "Remote Host"));
                         statusBadge.setForeground(COLOR_AMBER);
+                        String sAddr = resolveDynamicServerAddress();
+                        if (ipAddressField != null && sAddr != null && !sAddr.isEmpty() && !sAddr.equals("Connecting...")) {
+                            ipAddressField.setText(sAddr);
+                        }
                     } else {
                         // Dual-Layer Tunnel Ping Guard: Probe the live server address directly
                         String sAddr = resolveDynamicServerAddress();
@@ -2374,6 +2397,7 @@ public class ClusterGUI extends JFrame {
                     lastStatusBadgeTooltip = statusBadge.getToolTipText();
                     updateAdminLabels(genCheck, bucket);
                     updatePrimaryButtonState();
+                    refreshLiveRadarAsync();
                 });
             } catch (Exception e) {
                 SwingUtilities.invokeLater(() -> {
@@ -2673,6 +2697,96 @@ public class ClusterGUI extends JFrame {
                 });
     }
 
+    private void initLiveRadarPolling() {
+        liveRadarTimer = new javax.swing.Timer(12000, e -> refreshLiveRadarAsync());
+        liveRadarTimer.setInitialDelay(1500);
+        liveRadarTimer.start();
+    }
+
+    private void refreshLiveRadarAsync() {
+        workerPool.submit(() -> {
+            try {
+                String targetAddr;
+                if (isServerRunning) {
+                    targetAddr = "127.0.0.1:25565";
+                } else {
+                    targetAddr = resolveDynamicServerAddress();
+                }
+
+                if (targetAddr == null || targetAddr.isBlank() || targetAddr.equals("Connecting...")) {
+                    SwingUtilities.invokeLater(() -> {
+                        if (playerRadarBadge != null) {
+                            playerRadarBadge.setText("👥 Offline");
+                            playerRadarBadge.setForeground(COLOR_TEXT_MUTED);
+                            playerRadarBadge.setToolTipText("No server endpoint configured");
+                        }
+                        if (latencyRadarBadge != null) {
+                            latencyRadarBadge.setVisible(false);
+                        }
+                    });
+                    return;
+                }
+
+                ServerLauncher.PingResult pr = ServerLauncher.pingMinecraftServer(targetAddr);
+                SwingUtilities.invokeLater(() -> {
+                    if (pr.isOnline) {
+                        if (playerRadarBadge != null) {
+                            playerRadarBadge.setText(String.format("👥 %d / %d Online", pr.onlinePlayers, pr.maxPlayers));
+                            playerRadarBadge.setForeground(COLOR_EMERALD);
+
+                            String displayAddr = isServerRunning ? "127.0.0.1:25565 (Local Host)" : targetAddr;
+                            StringBuilder tip = new StringBuilder("<html>");
+                            tip.append("<b>Minecraft Server Online</b><br>");
+                            tip.append("<b>Endpoint:</b> ").append(escapeHtml(displayAddr)).append("<br>");
+                            tip.append("<b>Latency:</b> ").append(pr.latencyMs).append(" ms<br>");
+                            tip.append("<b>Players:</b> ").append(pr.onlinePlayers).append(" / ").append(pr.maxPlayers);
+                            if (pr.playerSample != null && !pr.playerSample.isEmpty()) {
+                                tip.append("<br><br><b>Connected Players:</b><br>");
+                                for (String p : pr.playerSample) {
+                                    tip.append("• ").append(escapeHtml(p)).append("<br>");
+                                }
+                            }
+                            tip.append("</html>");
+                            playerRadarBadge.setToolTipText(tip.toString());
+                        }
+                        if (latencyRadarBadge != null) {
+                            latencyRadarBadge.setText(String.format("⚡ %dms", pr.latencyMs));
+                            if (pr.latencyMs < 75) {
+                                latencyRadarBadge.setForeground(COLOR_EMERALD);
+                            } else if (pr.latencyMs < 180) {
+                                latencyRadarBadge.setForeground(COLOR_AMBER);
+                            } else {
+                                latencyRadarBadge.setForeground(COLOR_ROSE);
+                            }
+                            latencyRadarBadge.setToolTipText("Roundtrip ping to Minecraft server: " + pr.latencyMs + " ms");
+                            latencyRadarBadge.setVisible(true);
+                        }
+                    } else {
+                        if (playerRadarBadge != null) {
+                            if (isServerRunning) {
+                                playerRadarBadge.setText("👥 Starting...");
+                                playerRadarBadge.setForeground(COLOR_AMBER);
+                                playerRadarBadge.setToolTipText("Server process is initializing, awaiting port 25565 bind...");
+                            } else {
+                                playerRadarBadge.setText("👥 Offline");
+                                playerRadarBadge.setForeground(COLOR_TEXT_MUTED);
+                                playerRadarBadge.setToolTipText("Server is offline at " + escapeHtml(targetAddr));
+                            }
+                        }
+                        if (latencyRadarBadge != null) {
+                            latencyRadarBadge.setVisible(false);
+                        }
+                    }
+                });
+            } catch (Exception ignored) {}
+        });
+    }
+
+    private static String escapeHtml(String text) {
+        if (text == null) return "";
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+    }
+
     private void persistConfigRam(String memStr) {
         Path cfg = rootDir.resolve("config.json");
         if (!Files.exists(cfg)) return;
@@ -2693,6 +2807,9 @@ public class ClusterGUI extends JFrame {
     }
 
     private void handleWindowClose() {
+        if (liveRadarTimer != null) {
+            try { liveRadarTimer.stop(); } catch (Exception ignored) {}
+        }
         if (isServerRunning) {
             int confirm = JOptionPane.showConfirmDialog(this,
                     "Minecraft server is actively running!\nClosing the window will shut down the server and sync your world to the cloud.\n\nExit now?",
@@ -2830,7 +2947,8 @@ public class ClusterGUI extends JFrame {
                     appendConsoleLog("[Cluster Switcher] Active cluster switched to: " + profile.name);
                     loadSettingsIntoFields();
                     invalidateCloudCache();
-            refreshCloudLockStatus(true);
+                    refreshCloudLockStatus(true);
+                    refreshLiveRadarAsync();
                     resetMilestones();
                     updatePrimaryButtonState();
                 } else {
