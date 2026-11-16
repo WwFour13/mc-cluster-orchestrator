@@ -18,7 +18,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.7";
+    public static final String APP_VERSION = "2.1.8";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -844,8 +844,12 @@ public class ServerLauncher {
     public static CommandResult readCloudLock(Path rootDir, String rclone, String b2Target) {
         // Zero-Class-B check: verify cluster.lock exists via free Class A ListObjectsV2 before calling cat
         CommandResult lsRes = runCommand(10, rootDir, rclone, "lsf", b2Target, "--files-only", "--include", "/cluster.lock", "--retries", "1");
-        if (lsRes.exitCode != 0 || lsRes.stdout == null || !lsRes.stdout.contains("cluster.lock")) {
-            return new CommandResult(1, "", "Lock does not exist");
+        if (lsRes.exitCode == 0) {
+            if (lsRes.stdout == null || !lsRes.stdout.contains("cluster.lock")) {
+                return new CommandResult(4, "", "Object not found (cluster.lock does not exist)");
+            }
+        } else {
+            return lsRes;
         }
         return runCommand(15, rootDir, rclone, "cat", b2Target + "/cluster.lock", "--retries", "1");
     }
@@ -924,6 +928,8 @@ public class ServerLauncher {
                     || err.contains("nosuchkey")
                     || err.contains("object not found")
                     || err.contains("file not found")
+                    || err.contains("lock does not exist")
+                    || err.contains("does not exist")
                     || err.contains("directory not found");
             if (!isMissing) {
                 System.err.println("[SPLIT-BRAIN GUARD] Cannot verify cloud lock status due to network or cloud error: " + (catRes.stderr.isEmpty() ? "Exit code " + catRes.exitCode : catRes.stderr));
