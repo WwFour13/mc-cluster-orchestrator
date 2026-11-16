@@ -18,7 +18,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.8";
+    public static final String APP_VERSION = "2.1.9";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -770,6 +770,9 @@ public class ServerLauncher {
             cmd.add(filterPath.toString());
         }
         cmd.add("--fast-list");
+        cmd.add("--use-server-modtime");
+        cmd.add("--update");
+        cmd.add("--s3-no-head-object");
 
         CommandResult res = runCommand(rootDir, cmd.toArray(new String[0]));
         if (res.exitCode == 0) {
@@ -824,7 +827,9 @@ public class ServerLauncher {
             cmd.add(b2Target + "/world");
         }
         cmd.add("--fast-list");
+        cmd.add("--use-server-modtime");
         cmd.add("--update");
+        cmd.add("--s3-no-head");
         cmd.add("--bwlimit");
         cmd.add(bwLimit != null && !bwLimit.isEmpty() ? bwLimit : "10M");
 
@@ -1421,7 +1426,7 @@ public class ServerLauncher {
         if (endpoint != null) endpoint = endpoint.trim();
 
         if (endpoint != null && !endpoint.isEmpty()) {
-            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s,no_check_bucket=true:%s/server",
+            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s,no_check_bucket=true,no_head=true,no_head_object=true:%s/server",
                     endpoint, keyId, appKey, bucket);
         }
         if (keyId != null && keyId.length() >= 3 && keyId.matches("^00[0-9].*")) {
@@ -1430,7 +1435,7 @@ public class ServerLauncher {
             if (cluster.equals("005")) region = "us-east-";
             else if (cluster.equals("003")) region = "eu-central-";
             String s3Endpoint = "s3." + region + cluster + ".backblazeb2.com";
-            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s,no_check_bucket=true:%s/server",
+            return String.format(":s3,provider=Other,endpoint=%s,access_key_id=%s,secret_access_key=%s,no_check_bucket=true,no_head=true,no_head_object=true:%s/server",
                     s3Endpoint, keyId, appKey, bucket);
         }
         return String.format(":b2,account=\"%s\",key=\"%s\":%s/server", keyId, appKey, bucket);
@@ -1822,6 +1827,9 @@ public class ServerLauncher {
             cmd.add(filterPath.toString());
         }
         cmd.add("--fast-list");
+        cmd.add("--use-server-modtime");
+        cmd.add("--update");
+        cmd.add("--s3-no-head-object");
         cmd.add("--dry-run");
 
         CommandResult res = runCommand(rootDir, cmd.toArray(new String[0]));
