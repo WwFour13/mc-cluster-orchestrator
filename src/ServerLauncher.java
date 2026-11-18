@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.*;
 import java.util.zip.*;
 
@@ -31,6 +32,8 @@ public class ServerLauncher {
     private static Process activePlayitProcess = null;
     private static BufferedWriter activeMcStdin = null;
     private static final AtomicBoolean remoteStopTriggered = new AtomicBoolean(false);
+    private static final AtomicLong lastStopSignalCheckMs = new AtomicLong(0);
+    public static final AtomicBoolean emergencyModeActive = new AtomicBoolean(false);
     private static final AtomicBoolean isPushActive = new AtomicBoolean(false);
     private static volatile CompletableFuture<?> activeIncrementalPush = null;
     private static volatile String activeLockId = null;
@@ -263,7 +266,13 @@ public class ServerLauncher {
                         if (hasB2) {
                             CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
                             if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
-                                System.out.println("Active Cloud Lock: " + catRes.stdout);
+                                boolean released = extractJsonBoolean(catRes.stdout, "released", false);
+                                String activeHost = extractJsonString(catRes.stdout, "host");
+                                if (released || activeHost == null || activeHost.trim().isEmpty()) {
+                                    System.out.println("Cloud Lock: FREE (Released)");
+                                } else {
+                                    System.out.println("Active Cloud Lock: " + catRes.stdout);
+                                }
                             } else {
                                 System.out.println("Cloud Lock: FREE (No active host)");
                             }
@@ -381,7 +390,9 @@ public class ServerLauncher {
                 System.out.println("\n========================================================");
                 System.out.printf("[ACTIVE HOST PRIORITY GATE] Cluster is actively hosted by '%s'!%n", lockHost);
                 System.out.println("Initial cloud sync is paused to guarantee live gameplay backup bandwidth.");
-                System.out.println("You can connect directly to the live session at: " + (duckDomain != null && !duckDomain.isEmpty() ? duckDomain + ".duckdns.org" : "jensen-edited.tun.ply.gg"));
+                String liveAddr = (duckDomain != null && !duckDomain.isEmpty()) ? duckDomain + ".duckdns.org" : resolvePlayitAddressFromToml(rootDir);
+                if (liveAddr == null || liveAddr.isEmpty()) liveAddr = "the active cluster address";
+                System.out.println("You can connect directly to the live session at: " + liveAddr);
                 System.out.println("========================================================\n");
                 return;
             }
@@ -401,15 +412,23 @@ public class ServerLauncher {
                 // Anti-Split-Brain Gate: ensure cloud state is reachable and verifiable
                 cCheck = checkCloudGeneration(rootDir, rclone, b2Target);
                 if (cCheck.status() != CloudGenerationResult.Status.OK && cCheck.status() != CloudGenerationResult.Status.FRESH_BUCKET) {
-                    System.err.println("\n========================================================");
-                    System.err.println("[SPLIT-BRAIN GUARD] Cloud state check failed!");
-                    System.err.println("  Reason: " + cCheck.detailMessage());
-                    System.err.println("  Launch aborted to prevent split-brain conflicts & world corruption.");
-                    System.err.println("========================================================\n");
+                    if (cCheck.status() == CloudGenerationResult.Status.QUOTA_EXCEEDED && isEmergencyModeActive(rootDir)) {
+                        System.out.println("[EMERGENCY MODE] Active: Bypassing cloud generation check and cloud pull.");
+                        System.out.printf("[EMERGENCY MODE] Hosting locally on Base Generation #%d.%n", readLocalGeneration(rootDir));
+                    } else {
+                        System.err.println("\n========================================================");
+                        System.err.println("[SPLIT-BRAIN GUARD] Cloud state check failed!");
+                        System.err.println("  Reason: " + cCheck.detailMessage());
+                        System.err.println("  Launch aborted to prevent split-brain conflicts & world corruption.");
+                        System.err.println("========================================================\n");
+                        return;
+                    }
+                }
+                if (!isEmergencyModeActive(rootDir) && !acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
                     return;
                 }
-                if (!acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
-                    return;
+                if (isEmergencyModeActive(rootDir)) {
+                    writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
                 }
                 // Clear any leftover stop signal from previous sessions
                 cancelRemoteStop(rootDir, rclone, b2Target);
@@ -460,9 +479,13 @@ public class ServerLauncher {
 
             // 4. Pre-Boot State Convergence
             if (hasB2) {
-                System.out.println("[4/6] Synchronizing administrative distribution & latest world state...");
-                syncAdminDistribution(rootDir, rclone, b2Target);
-                pullFromB2(rootDir, rclone, b2Target, staleMin, true, cCheck != null ? cCheck.generation() : -1, -1.0);
+                if (isEmergencyModeActive(rootDir)) {
+                    System.out.println("[4/6] Emergency Mode Active: Skipping cloud pull. Booting directly from local world.");
+                } else {
+                    System.out.println("[4/6] Synchronizing administrative distribution & latest world state...");
+                    syncAdminDistribution(rootDir, rclone, b2Target);
+                    pullFromB2(rootDir, rclone, b2Target, staleMin, true, cCheck != null ? cCheck.generation() : -1, -1.0);
+                }
             } else {
                 System.out.println("[4/6] No cloud sync provider configured. Running in local standalone mode.");
             }
@@ -470,16 +493,24 @@ public class ServerLauncher {
             // 5. Asynchronous Heartbeat, Remote Stop Poller, & In-Game Autosave Dispatcher
             heartbeatScheduler = Executors.newScheduledThreadPool(2);
 
-            // Heartbeat & Remote Stop timer (conserves B2 free tier: runs every heartbeatSec, default 120s)
+            // Heartbeat timer (runs every heartbeatSec, default 300s)
             heartbeatScheduler.scheduleAtFixedRate(() -> {
                 try {
                     writeLockFile(lockPath, localHost);
                     if (hasB2) {
                         writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
-                        checkRemoteStopSignal(rootDir, rclone, b2Target, activeMcStdin);
                     }
                 } catch (Exception ignored) {}
             }, heartbeatSec, heartbeatSec, TimeUnit.SECONDS);
+
+            // In-Flight Signaling: check every 60 seconds (1 minute cadence, suppressed in emergency mode)
+            if (hasB2) {
+                heartbeatScheduler.scheduleAtFixedRate(() -> {
+                    try {
+                        checkRemoteStopSignal(rootDir, rclone, b2Target, activeMcStdin);
+                    } catch (Exception ignored) {}
+                }, 60, 60, TimeUnit.SECONDS);
+            }
 
             // In-Game Autosave & Incremental Cloud Push (every saveIntervalMin)
             if (hasB2 && saveIntervalMin > 0) {
@@ -623,22 +654,42 @@ public class ServerLauncher {
         if (b2Target != null && !b2Target.isEmpty()) {
             System.out.println("[B2 Sync] Pushing final world and server state to Backblaze B2...");
             boolean pushed = pushToB2(rootDir, rclone, b2Target, host, staleMin, bwLimit, true);
-            releaseCloudLock(rootDir, rclone, b2Target);
-            cancelRemoteStop(rootDir, rclone, b2Target);
-            // Note: Superseded chunk revisions are pruned asynchronously via B2 Bucket Lifecycle Rules
-            // (0 transaction cost) or on-demand via the Admin tab / CLI (purge-revisions).
+            if (pushed) {
+                releaseCloudLock(rootDir, rclone, b2Target);
+                cancelRemoteStop(rootDir, rclone, b2Target);
+                clearEmergencyMode(rootDir);
+                System.out.println("[Cluster] Cluster cleanly released. Ready for next host.");
+            } else {
+                System.err.println("\n========================================================");
+                System.err.println("[SAFETY GUARD] Outbound push failed or could not be verified.");
+                System.err.println("  Cloud lock RETAINED on Backblaze B2 to protect local world progress and prevent split-brain.");
+                System.err.println("  Your latest world progress is safely saved on your local disk.");
+                if (isEmergencyModeActive(rootDir)) {
+                    System.out.println("  Emergency Local Mode remains active until 00:00 UTC (or next successful sync).");
+                }
+                System.err.println("========================================================\n");
+            }
         }
 
         try {
             Files.deleteIfExists(lockPath);
         } catch (IOException ignored) {}
 
-        System.out.println("[Cluster] Cluster cleanly released. Ready for next host.");
         isShuttingDown = false;
     }
 
     public static void checkRemoteStopSignal(Path rootDir, String rclone, String b2Target, BufferedWriter mcStdin) {
         if (remoteStopTriggered.get()) return;
+        if (isEmergencyModeActive(rootDir)) return;
+
+        long now = System.currentTimeMillis();
+        long last = lastStopSignalCheckMs.get();
+        if (now - last < 60_000L) {
+            return;
+        }
+        if (!lastStopSignalCheckMs.compareAndSet(last, now)) {
+            return;
+        }
 
         // Zero-Class-B guard: check if remote_stop.signal exists via 1 Class C listing (lsf) to prevent Class B 404 reads when absent
         CommandResult lsRes = runCommand(10, rootDir, rclone, "lsf", b2Target, "--files-only", "--include", "/remote_stop.signal", "--retries", "1");
@@ -648,6 +699,9 @@ public class ServerLauncher {
 
         CommandResult res = runCommand(15, rootDir, rclone, "cat", b2Target + "/remote_stop.signal", "--retries", "1");
         if (res.exitCode == 0 && !res.stdout.isEmpty()) {
+            if (extractJsonBoolean(res.stdout, "active", true) == false) {
+                return;
+            }
             if (remoteStopTriggered.compareAndSet(false, true)) {
                 String reason = extractJsonString(res.stdout, "reason");
                 if (reason == null || reason.isEmpty()) reason = "Admin requested server stop";
@@ -708,10 +762,7 @@ public class ServerLauncher {
     }
 
     public static void cancelRemoteStop(Path rootDir, String rclone, String b2Target) {
-        CommandResult lsRes = runCommand(10, rootDir, rclone, "lsf", b2Target, "--files-only", "--include", "/remote_stop.signal", "--retries", "1");
-        if (lsRes.exitCode == 0 && lsRes.stdout != null && lsRes.stdout.contains("remote_stop.signal")) {
-            runCommand(15, rootDir, rclone, "deletefile", b2Target + "/remote_stop.signal");
-        }
+        runCommand(15, rootDir, rclone, "delete", b2Target, "--include", "/remote_stop.signal", "--retries", "1");
     }
 
     public static boolean pullFromB2(Path rootDir, String rclone, String b2Target, int staleMin, boolean force) {
@@ -902,7 +953,11 @@ public class ServerLauncher {
     public static boolean isCloudLocked(Path rootDir, String rclone, String b2Target, int staleMin) {
         CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
         if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
+            boolean released = extractJsonBoolean(catRes.stdout, "released", false);
             String activeHost = extractJsonString(catRes.stdout, "host");
+            if (released || activeHost == null || activeHost.trim().isEmpty()) {
+                return false;
+            }
             String timestampStr = extractJsonString(catRes.stdout, "timestamp");
             if (timestampStr != null && !timestampStr.isEmpty()) {
                 try {
@@ -937,8 +992,9 @@ public class ServerLauncher {
     public static String readLockHost(Path rootDir, String rclone, String b2Target) {
         CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
         if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
+            boolean released = extractJsonBoolean(catRes.stdout, "released", false);
             String activeHost = extractJsonString(catRes.stdout, "host");
-            if (activeHost != null && !activeHost.isEmpty()) {
+            if (!released && activeHost != null && !activeHost.isEmpty()) {
                 return activeHost;
             }
         }
@@ -963,20 +1019,23 @@ public class ServerLauncher {
     public static boolean acquireCloudLock(Path rootDir, String rclone, String b2Target, String host, int staleMin) {
         CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
         if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
+            boolean released = extractJsonBoolean(catRes.stdout, "released", false);
             String activeHost = extractJsonString(catRes.stdout, "host");
-            String timestampStr = extractJsonString(catRes.stdout, "timestamp");
-            if (timestampStr != null && !timestampStr.isEmpty()) {
-                try {
-                    Instant lastBeat = Instant.parse(timestampStr);
-                    long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
-                    if (elapsedMinutes < staleMin) {
-                        System.err.printf("[ABORT] Server actively hosted by: %s%n", activeHost);
-                        System.err.printf("Active heartbeat was pulsed %d minutes ago.%n", elapsedMinutes);
-                        return false;
-                    } else {
-                        System.out.printf("[WARN] Host '%s' heartbeat expired (%d min elapsed). Reclaiming cloud lock...%n", activeHost, elapsedMinutes);
-                    }
-                } catch (Exception ignored) {}
+            if (!released && activeHost != null && !activeHost.trim().isEmpty()) {
+                String timestampStr = extractJsonString(catRes.stdout, "timestamp");
+                if (timestampStr != null && !timestampStr.isEmpty()) {
+                    try {
+                        Instant lastBeat = Instant.parse(timestampStr);
+                        long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
+                        if (elapsedMinutes < staleMin) {
+                            System.err.printf("[ABORT] Server actively hosted by: %s%n", activeHost);
+                            System.err.printf("Active heartbeat was pulsed %d minutes ago.%n", elapsedMinutes);
+                            return false;
+                        } else {
+                            System.out.printf("[WARN] Host '%s' heartbeat expired (%d min elapsed). Reclaiming cloud lock...%n", activeHost, elapsedMinutes);
+                        }
+                    } catch (Exception ignored) {}
+                }
             }
         } else if (catRes.exitCode != 0) {
             if (!isExplicitNotFound(catRes)) {
@@ -1029,10 +1088,8 @@ public class ServerLauncher {
 
     public static void releaseCloudLock(Path rootDir, String rclone, String b2Target) {
         activeLockId = null;
-        CommandResult lsRes = runCommand(10, rootDir, rclone, "lsf", b2Target, "--files-only", "--include", "/cluster.lock", "--retries", "1");
-        if (lsRes.exitCode == 0 && lsRes.stdout != null && lsRes.stdout.contains("cluster.lock")) {
-            runCommand(15, rootDir, rclone, "deletefile", b2Target + "/cluster.lock");
-        }
+        String tombstone = "{\"host\":\"\",\"lock_id\":\"\",\"released\":true,\"timestamp\":\"1970-01-01T00:00:00Z\"}";
+        runCommandWithInput(15, tombstone, rootDir, rclone, "rcat", b2Target + "/cluster.lock");
     }
 
     public static CommandResult writeCloudHeartbeat(Path rootDir, String rclone, String b2Target, String host) {
@@ -1041,9 +1098,9 @@ public class ServerLauncher {
 
     public static CommandResult writeCloudHeartbeat(Path rootDir, String rclone, String b2Target, String host, String lockId) {
         String lockJson = (lockId != null && !lockId.isEmpty())
-                ? String.format("{\"host\":\"%s\",\"lock_id\":\"%s\",\"timestamp\":\"%s\"}",
+                ? String.format("{\"host\":\"%s\",\"lock_id\":\"%s\",\"released\":false,\"timestamp\":\"%s\"}",
                         host, lockId, DateTimeFormatter.ISO_INSTANT.format(Instant.now()))
-                : String.format("{\"host\":\"%s\",\"timestamp\":\"%s\"}",
+                : String.format("{\"host\":\"%s\",\"released\":false,\"timestamp\":\"%s\"}",
                         host, DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
         return runCommandWithInput(15, lockJson, rootDir, rclone, "rcat", b2Target + "/cluster.lock");
     }
@@ -1916,6 +1973,12 @@ public class ServerLauncher {
         return m.find() ? m.group(1).trim() : "";
     }
 
+    public static boolean extractJsonBoolean(String json, String key, boolean def) {
+        if (json == null) return def;
+        Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*(true|false)", Pattern.CASE_INSENSITIVE).matcher(json);
+        return m.find() ? Boolean.parseBoolean(m.group(1)) : def;
+    }
+
     public static int extractJsonInt(String json, String key, int def) {
         Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*([0-9]+)").matcher(json);
         return m.find() ? Integer.parseInt(m.group(1)) : def;
@@ -1951,6 +2014,54 @@ public class ServerLauncher {
         long hours = diff.toHours();
         long minutes = diff.toMinutesPart();
         return String.format("%d hours, %d minutes", hours, minutes);
+    }
+
+    public static boolean isEmergencyModeActive(Path rootDir) {
+        if (emergencyModeActive.get()) return true;
+        Path p = rootDir.resolve(".emergency_host.json");
+        if (!Files.exists(p)) return false;
+        try {
+            String content = Files.readString(p);
+            String expStr = extractJsonString(content, "expires_at");
+            if (expStr != null && !expStr.isEmpty()) {
+                Instant exp = Instant.parse(expStr);
+                if (Instant.now().isAfter(exp)) {
+                    Files.deleteIfExists(p);
+                    return false;
+                }
+            }
+            emergencyModeActive.set(true);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public static void activateEmergencyMode(Path rootDir, String host, int localGen, String reason) {
+        emergencyModeActive.set(true);
+        Instant now = Instant.now();
+        Instant midnightUtc = now.atZone(ZoneOffset.UTC)
+                .toLocalDate()
+                .plusDays(1)
+                .atStartOfDay(ZoneOffset.UTC)
+                .toInstant();
+        String json = String.format("{\"host\":\"%s\",\"local_generation\":%d,\"activated_at\":\"%s\",\"expires_at\":\"%s\",\"reason\":\"%s\"}",
+                host, localGen, DateTimeFormatter.ISO_INSTANT.format(now), DateTimeFormatter.ISO_INSTANT.format(midnightUtc),
+                reason != null ? reason.replace("\"", "\\\"") : "QUOTA_EXCEEDED");
+        try {
+            Files.writeString(rootDir.resolve(".emergency_host.json"), json);
+            System.out.println("[EMERGENCY MODE] Activated locally. Server will boot from local world without cloud pull.");
+            System.out.printf("[EMERGENCY MODE] Automatically expires at 00:00 UTC (in %s).%n", getTimeUntilUtcMidnightFormatted());
+        } catch (IOException e) {
+            System.err.println("[WARN] Failed to write .emergency_host.json: " + e.getMessage());
+        }
+    }
+
+    public static void clearEmergencyMode(Path rootDir) {
+        emergencyModeActive.set(false);
+        try {
+            Files.deleteIfExists(rootDir.resolve(".emergency_host.json"));
+        } catch (IOException ignored) {}
     }
 
     public static boolean isWorldEmpty(Path rootDir) {

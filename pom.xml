@@ -18,5 +18,6 @@
 
     <build>
         <sourceDirectory>src</sourceDirectory>
+        <testSourceDirectory>tests</testSourceDirectory>
     </build>
 </project>

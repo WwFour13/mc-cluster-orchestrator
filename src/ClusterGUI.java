@@ -11,6 +11,7 @@ import java.lang.management.ManagementFactory;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.time.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -665,7 +666,7 @@ public class ClusterGUI extends JFrame {
         // Header Title
         JPanel header = new JPanel(new GridLayout(2, 1, 0, 4));
         header.setOpaque(false);
-        adminClusterHeaderLabel = new JLabel("CLUSTER GOVERNANCE (Dorm Craft SMP)");
+        adminClusterHeaderLabel = new JLabel("CLUSTER GOVERNANCE");
         adminClusterHeaderLabel.setFont(new Font("Segoe UI", Font.BOLD, 18));
         adminClusterHeaderLabel.setForeground(COLOR_TEXT_PRIMARY);
 
@@ -1852,12 +1853,24 @@ public class ClusterGUI extends JFrame {
                 primaryActionBtn.setEnabled(true);
                 if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
                 if (java25Banner != null) java25Banner.setVisible(true);
+            } else if (ServerLauncher.isEmergencyModeActive(rootDir)) {
+                primaryActionBtn.setText("▶  START SERVER (EMERGENCY MODE)");
+                primaryActionBtn.setBackgroundColor(COLOR_AMBER);
+                primaryActionBtn.setEnabled(true);
+                if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
+                if (java25Banner != null) java25Banner.setVisible(false);
             } else if (lastCloudGenerationResult != null &&
                        lastCloudGenerationResult.status() != ServerLauncher.CloudGenerationResult.Status.OK &&
                        lastCloudGenerationResult.status() != ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
-                primaryActionBtn.setText("CLOUD STATE INDETERMINATE");
-                primaryActionBtn.setBackgroundColor(COLOR_AMBER);
-                primaryActionBtn.setEnabled(true);
+                if (lastCloudGenerationResult.status() == ServerLauncher.CloudGenerationResult.Status.QUOTA_EXCEEDED && !ServerLauncher.isWorldEmpty(rootDir)) {
+                    primaryActionBtn.setText("▶  START SERVER (EMERGENCY MODE)");
+                    primaryActionBtn.setBackgroundColor(COLOR_AMBER);
+                    primaryActionBtn.setEnabled(true);
+                } else {
+                    primaryActionBtn.setText("CLOUD STATE INDETERMINATE");
+                    primaryActionBtn.setBackgroundColor(COLOR_AMBER);
+                    primaryActionBtn.setEnabled(true);
+                }
                 if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
                 if (java25Banner != null) java25Banner.setVisible(false);
             } else {
@@ -1930,11 +1943,15 @@ public class ClusterGUI extends JFrame {
                 if (ServerLauncher.isWorldEmpty(rootDir) && ServerLauncher.isCloudLocked(rootDir, rclone, b2Target, staleMin)) {
                     String lockHost = ServerLauncher.readLockHost(rootDir, rclone, b2Target);
                     appendConsoleLog("[Active Host Priority Gate] Cluster is actively hosted by '" + lockHost + "'!");
+                    String activeAddr = resolveDynamicServerAddress();
+                    if (activeAddr == null || activeAddr.isEmpty()) {
+                        activeAddr = (duckDomain != null && !duckDomain.isEmpty()) ? duckDomain + ".duckdns.org" : "the active cluster address";
+                    }
                     abortLaunch("ACTIVE HOST PRIORITY GATE\n\n" +
                             "This cluster is actively hosted live by: " + lockHost + "\n\n" +
                             "Initial cloud downloads are paused to guarantee live gameplay backup bandwidth.\n" +
                             "Please connect directly to the active session at:\n" +
-                            (duckDomain != null && !duckDomain.isEmpty() ? duckDomain + ".duckdns.org" : "jensen-edited.tun.ply.gg"));
+                            activeAddr);
                     return;
                 }
 
@@ -1953,86 +1970,125 @@ public class ClusterGUI extends JFrame {
                 // Milestone 2: Cloud Lock
                 updateMilestoneStep(1, "2. Cloud Lock...", COLOR_AMBER, 35);
                 appendConsoleLog("[Step 2/5] Acquiring cluster cloud lock...");
-                if (!ServerLauncher.acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
-                    appendConsoleLog("[ABORT] Lock acquisition refused (Cluster is active on another host or cloud unreachable).");
-                    abortLaunch("CLOUD LOCK REFUSED (LAUNCH BLOCKED)\n\n" +
-                            "The orchestrator cannot secure exclusive hosting rights on Backblaze B2:\n" +
-                            "• Either another host is actively hosting this cluster, or\n" +
-                            "• Network / credential errors prevented cloud lock verification.\n\n" +
-                            "Launch has been safely halted to prevent split-brain conflicts.");
-                    return;
+                boolean isEmergency = ServerLauncher.isEmergencyModeActive(rootDir);
+                if (isEmergency) {
+                    appendConsoleLog("[EMERGENCY MODE] Active: Bypassing cloud read lock check. Pulsing lock heartbeat...");
+                    ServerLauncher.writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
+                } else if (!ServerLauncher.acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
+                    // Check if failure was due to quota and local world exists: offer emergency mode!
+                    if (lastCloudGenerationResult != null &&
+                        lastCloudGenerationResult.status() == ServerLauncher.CloudGenerationResult.Status.QUOTA_EXCEEDED &&
+                        !ServerLauncher.isWorldEmpty(rootDir)) {
+                        final int[] emChoice = new int[1];
+                        try {
+                            SwingUtilities.invokeAndWait(() -> {
+                                emChoice[0] = JOptionPane.showConfirmDialog(this,
+                                        "Backblaze B2 Daily Quota Exceeded.\n\n" +
+                                        "You have an existing local world save (Generation #" + ServerLauncher.readLocalGeneration(rootDir) + ").\n" +
+                                        "Would you like to start in Emergency Local Mode?\n\n" +
+                                        "• The server will run locally with Playit tunnel enabled for friends.\n" +
+                                        "• World saves will be pushed best-effort without inbound reads.\n" +
+                                        "• Emergency Mode will automatically expire at 00:00 UTC.",
+                                        "Activate Emergency Local Mode?", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                            });
+                        } catch (Exception ignored) {}
+                        if (emChoice[0] == JOptionPane.YES_OPTION) {
+                            ServerLauncher.activateEmergencyMode(rootDir, localHost, ServerLauncher.readLocalGeneration(rootDir), "QUOTA_EXCEEDED");
+                            isEmergency = true;
+                            appendConsoleLog("[EMERGENCY MODE] Activated by user. Pulsing cloud lock heartbeat...");
+                            ServerLauncher.writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
+                        } else {
+                            abortLaunch("CLOUD QUOTA EXCEEDED (LAUNCH BLOCKED)\n\n" +
+                                    "Backblaze B2 daily download/transaction quota exceeded.\n" +
+                                    "Free quota resets automatically at 00:00 UTC (in " + ServerLauncher.getTimeUntilUtcMidnightFormatted() + ").");
+                            return;
+                        }
+                    } else {
+                        appendConsoleLog("[ABORT] Lock acquisition refused (Cluster is active on another host or cloud unreachable).");
+                        abortLaunch("CLOUD LOCK REFUSED (LAUNCH BLOCKED)\n\n" +
+                                "The orchestrator cannot secure exclusive hosting rights on Backblaze B2:\n" +
+                                "• Either another host is actively hosting this cluster, or\n" +
+                                "• Network / credential errors prevented cloud lock verification.\n\n" +
+                                "Launch has been safely halted to prevent split-brain conflicts.");
+                        return;
+                    }
                 }
                 ServerLauncher.cancelRemoteStop(rootDir, rclone, b2Target);
                 ServerLauncher.writeLockFile(lockPath, localHost);
-                updateMilestoneStep(1, "2. Lock Acquired", COLOR_EMERALD, 40);
+                updateMilestoneStep(1, isEmergency ? "2. Lock Acquired (Emergency)" : "2. Lock Acquired", COLOR_EMERALD, 40);
 
                 // Milestone 3: World Sync & Anti-Split-Brain Gate
                 updateMilestoneStep(2, "3. Verifying Cloud...", COLOR_AMBER, 55);
                 appendConsoleLog("[Step 3/5] Verifying cloud generation & assessing bandwidth...");
-                ServerLauncher.CloudGenerationResult cloudCheck = ServerLauncher.checkCloudGeneration(rootDir, rclone, b2Target);
-                if (cloudCheck.status() != ServerLauncher.CloudGenerationResult.Status.OK && cloudCheck.status() != ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
-                    appendConsoleLog("[SPLIT-BRAIN GUARD] Cloud check failed: " + cloudCheck.detailMessage());
-                    ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
-                    Files.deleteIfExists(lockPath);
-                    abortLaunch("CLOUD STATE INDETERMINATE (LAUNCH BLOCKED)\n\n" +
-                            "The orchestrator cannot verify the remote cloud state:\n" +
-                            "Reason: " + cloudCheck.detailMessage() + "\n\n" +
-                            "Launch has been safely blocked to prevent split-brain collisions.\n" +
-                            "Please check your internet connection, VM clock, or B2 keys in Settings.");
-                    return;
-                }
-
-                int cloudGen = cloudCheck.generation();
-                int localGen = ServerLauncher.readLocalGeneration(rootDir);
-
-                if (localGen > 0 && cloudGen > 0 && localGen == cloudGen && !ServerLauncher.isWorldEmpty(rootDir)) {
-                    appendConsoleLog(String.format("[B2 Sync] Local base matches Cloud Generation #%d. Zero-egress bypass active (0 MB downloaded).", cloudGen));
-                    updateMilestoneStep(2, "3. Synchronized (0 MB)", COLOR_EMERALD, 65);
+                if (isEmergency) {
+                    appendConsoleLog(String.format("[EMERGENCY MODE] Active: Bypassing cloud pull. Hosting locally on Base Generation #%d.", ServerLauncher.readLocalGeneration(rootDir)));
+                    updateMilestoneStep(2, "3. Emergency Base (#" + ServerLauncher.readLocalGeneration(rootDir) + ")", COLOR_AMBER, 65);
                 } else {
-                    double estMb = ServerLauncher.estimateEgressMb(rootDir, rclone, b2Target, cloudGen);
-                    appendConsoleLog(String.format("[B2 Sync] Cloud sync volume: %.1f MB estimated.", estMb));
-                    if (estMb > 600.0 || (estMb > 0 && ServerLauncher.isWorldEmpty(rootDir))) {
+                    ServerLauncher.CloudGenerationResult cloudCheck = ServerLauncher.checkCloudGeneration(rootDir, rclone, b2Target);
+                    if (cloudCheck.status() != ServerLauncher.CloudGenerationResult.Status.OK && cloudCheck.status() != ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
+                        appendConsoleLog("[SPLIT-BRAIN GUARD] Cloud check failed: " + cloudCheck.detailMessage());
                         ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
                         Files.deleteIfExists(lockPath);
-                        abortLaunch(String.format("LARGE CLOUD DOWNLOAD BLOCKED (%.1f MB)\n\n" +
-                                "This download would consume over 60%% of the cluster's daily free bandwidth.\n" +
-                                "To prevent locking out the cluster, automatic cloud download is restricted.\n\n" +
-                                "Workaround: Ask the active host for a 'cohost-files-YYYY-MM-DD.zip' to sync with zero cloud egress.", estMb));
+                        abortLaunch("CLOUD STATE INDETERMINATE (LAUNCH BLOCKED)\n\n" +
+                                "The orchestrator cannot verify the remote cloud state:\n" +
+                                "Reason: " + cloudCheck.detailMessage() + "\n\n" +
+                                "Launch has been safely blocked to prevent split-brain collisions.\n" +
+                                "Please check your internet connection, VM clock, or B2 keys in Settings.");
                         return;
-                    } else if (estMb >= 350.0) {
-                        final double finalEst = estMb;
-                        final int[] userChoice = new int[1];
-                        try {
-                            SwingUtilities.invokeAndWait(() -> {
-                                userChoice[0] = JOptionPane.showConfirmDialog(this,
-                                        String.format("Large Cloud Sync Advisory:\n\n" +
-                                                "Approximately %.1f MB of chunk diffs will be downloaded (~%.0f%% of daily quota).\n" +
-                                                "Do you want to proceed with cloud download, or cancel to import a co-host sync pack?",
-                                                finalEst, (finalEst / 1000.0) * 100),
-                                        "Cloud Bandwidth Advisory", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-                            });
-                        } catch (Exception ignored) {}
-                        if (userChoice[0] != JOptionPane.YES_OPTION) {
+                    }
+
+                    int cloudGen = cloudCheck.generation();
+                    int localGen = ServerLauncher.readLocalGeneration(rootDir);
+
+                    if (localGen > 0 && cloudGen > 0 && localGen == cloudGen && !ServerLauncher.isWorldEmpty(rootDir)) {
+                        appendConsoleLog(String.format("[B2 Sync] Local base matches Cloud Generation #%d. Zero-egress bypass active (0 MB downloaded).", cloudGen));
+                        updateMilestoneStep(2, "3. Synchronized (0 MB)", COLOR_EMERALD, 65);
+                    } else {
+                        double estMb = ServerLauncher.estimateEgressMb(rootDir, rclone, b2Target, cloudGen);
+                        appendConsoleLog(String.format("[B2 Sync] Cloud sync volume: %.1f MB estimated.", estMb));
+                        if (estMb > 600.0 || (estMb > 0 && ServerLauncher.isWorldEmpty(rootDir))) {
                             ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
                             Files.deleteIfExists(lockPath);
-                            abortLaunch("Launch cancelled by user to preserve cloud download bandwidth.");
+                            abortLaunch(String.format("LARGE CLOUD DOWNLOAD BLOCKED (%.1f MB)\n\n" +
+                                    "This download would consume over 60%% of the cluster's daily free bandwidth.\n" +
+                                    "To prevent locking out the cluster, automatic cloud download is restricted.\n\n" +
+                                    "Workaround: Ask the active host for a 'cohost-files-YYYY-MM-DD.zip' to sync with zero cloud egress.", estMb));
+                            return;
+                        } else if (estMb >= 350.0) {
+                            final double finalEst = estMb;
+                            final int[] userChoice = new int[1];
+                            try {
+                                SwingUtilities.invokeAndWait(() -> {
+                                    userChoice[0] = JOptionPane.showConfirmDialog(this,
+                                            String.format("Large Cloud Sync Advisory:\n\n" +
+                                                    "Approximately %.1f MB of chunk diffs will be downloaded (~%.0f%% of daily quota).\n" +
+                                                    "Do you want to proceed with cloud download, or cancel to import a co-host sync pack?",
+                                                    finalEst, (finalEst / 1000.0) * 100),
+                                            "Cloud Bandwidth Advisory", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                                });
+                            } catch (Exception ignored) {}
+                            if (userChoice[0] != JOptionPane.YES_OPTION) {
+                                ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
+                                Files.deleteIfExists(lockPath);
+                                abortLaunch("Launch cancelled by user to preserve cloud download bandwidth.");
+                                return;
+                            }
+                        }
+
+                        ServerLauncher.syncAdminDistribution(rootDir, rclone, b2Target);
+                        boolean syncOk = ServerLauncher.pullFromB2(rootDir, rclone, b2Target, staleMin, true, cloudGen, estMb);
+                        if (!syncOk) {
+                            appendConsoleLog("[ABORT] World synchronization failed.");
+                            ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
+                            Files.deleteIfExists(lockPath);
+                            abortLaunch("WORLD SYNCHRONIZATION FAILED (LAUNCH BLOCKED)\n\n" +
+                                    "Could not complete incremental sync with Backblaze B2.\n" +
+                                    "Launch has been halted to prevent hosting an out-of-sync local world.");
                             return;
                         }
+                        appendConsoleLog(String.format("[B2 Sync] Inbound synchronization completed (%.1f MB).", estMb));
+                        updateMilestoneStep(2, "3. Synchronized", COLOR_EMERALD, 65);
                     }
-
-                    ServerLauncher.syncAdminDistribution(rootDir, rclone, b2Target);
-                    boolean syncOk = ServerLauncher.pullFromB2(rootDir, rclone, b2Target, staleMin, true, cloudGen, estMb);
-                    if (!syncOk) {
-                        appendConsoleLog("[ABORT] World synchronization failed.");
-                        ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
-                        Files.deleteIfExists(lockPath);
-                        abortLaunch("WORLD SYNCHRONIZATION FAILED (LAUNCH BLOCKED)\n\n" +
-                                "Could not complete incremental sync with Backblaze B2.\n" +
-                                "Launch has been halted to prevent hosting an out-of-sync local world.");
-                        return;
-                    }
-                    appendConsoleLog(String.format("[B2 Sync] Inbound synchronization completed (%.1f MB).", estMb));
-                    updateMilestoneStep(2, "3. Synchronized", COLOR_EMERALD, 65);
                 }
 
                 // Playit Sidecar Daemon
@@ -2078,9 +2134,16 @@ public class ClusterGUI extends JFrame {
                     try {
                         ServerLauncher.writeLockFile(lockPath, localHost);
                         ServerLauncher.writeCloudHeartbeat(rootDir, finalRclone, finalB2, localHost);
-                        ServerLauncher.checkRemoteStopSignal(rootDir, finalRclone, finalB2, activeMcStdin);
                     } catch (Exception ignored) {}
                 }, heartbeatSec, heartbeatSec, TimeUnit.SECONDS);
+
+                if (finalB2 != null && !finalB2.isEmpty()) {
+                    heartbeatScheduler.scheduleAtFixedRate(() -> {
+                        try {
+                            ServerLauncher.checkRemoteStopSignal(rootDir, finalRclone, finalB2, activeMcStdin);
+                        } catch (Exception ignored) {}
+                    }, 60, 60, TimeUnit.SECONDS);
+                }
 
                 if (saveIntervalMin > 0) {
                     heartbeatScheduler.scheduleAtFixedRate(() -> {
@@ -2422,19 +2485,54 @@ public class ClusterGUI extends JFrame {
                         updateBanner.setVisible(true);
                     }
                     if (isServerRunning) {
-                        statusBadge.setText("● Hosting Session (Local)");
-                        statusBadge.setForeground(COLOR_BLUE);
+                        if (ServerLauncher.isEmergencyModeActive(rootDir)) {
+                            statusBadge.setText("● Hosting (Emergency Mode)");
+                            statusBadge.setForeground(COLOR_AMBER);
+                        } else {
+                            statusBadge.setText("● Hosting Session (Local)");
+                            statusBadge.setForeground(COLOR_BLUE);
+                        }
+                    } else if (ServerLauncher.isEmergencyModeActive(rootDir)) {
+                        statusBadge.setText("● Emergency Local Mode");
+                        statusBadge.setForeground(COLOR_AMBER);
+                        statusBadge.setToolTipText("Active until 00:00 UTC (Bypasses cloud reads on launch)");
                     } else if (genCheck.status() != ServerLauncher.CloudGenerationResult.Status.OK && genCheck.status() != ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
                         statusBadge.setText("● Cloud Error (" + genCheck.status() + ")");
                         statusBadge.setForeground(COLOR_ROSE);
                         statusBadge.setToolTipText(genCheck.detailMessage());
                     } else if (catRes.exitCode() == 0 && !catRes.stdout().isBlank()) {
                         String activeHost = ServerLauncher.extractJsonString(catRes.stdout(), "host");
-                        statusBadge.setText("● Active on " + (activeHost != null ? activeHost : "Remote Host"));
-                        statusBadge.setForeground(COLOR_AMBER);
-                        String sAddr = resolveDynamicServerAddress();
-                        if (ipAddressField != null && sAddr != null && !sAddr.isEmpty() && !sAddr.equals("Connecting...")) {
-                            ipAddressField.setText(sAddr);
+                        boolean released = ServerLauncher.extractJsonBoolean(catRes.stdout(), "released", false);
+                        String timestampStr = ServerLauncher.extractJsonString(catRes.stdout(), "timestamp");
+                        boolean isStale = false;
+                        if (timestampStr != null && !timestampStr.isEmpty()) {
+                            try {
+                                Instant lastBeat = Instant.parse(timestampStr);
+                                long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
+                                if (elapsedMinutes >= 12) isStale = true;
+                            } catch (Exception ignored) {}
+                        }
+                        if (!released && activeHost != null && !activeHost.isEmpty() && !isStale) {
+                            statusBadge.setText("● Active on " + activeHost);
+                            statusBadge.setForeground(COLOR_AMBER);
+                            String sAddr = resolveDynamicServerAddress();
+                            if (ipAddressField != null && sAddr != null && !sAddr.isEmpty() && !sAddr.equals("Connecting...")) {
+                                ipAddressField.setText(sAddr);
+                            }
+                        } else {
+                            // Dual-Layer Tunnel Ping Guard: Probe the live server address directly
+                            String sAddr = resolveDynamicServerAddress();
+                            if (ipAddressField != null && sAddr != null && !sAddr.isEmpty() && !sAddr.equals("Connecting...")) {
+                                ipAddressField.setText(sAddr);
+                            }
+                            ServerLauncher.PingResult pr = ServerLauncher.pingMinecraftServer(sAddr);
+                            if (pr.isOnline) {
+                                statusBadge.setText(String.format("● Live on Tunnel (%d Online)", pr.onlinePlayers));
+                                statusBadge.setForeground(COLOR_AMBER);
+                            } else {
+                                statusBadge.setText("● Cluster Available");
+                                statusBadge.setForeground(COLOR_EMERALD);
+                            }
                         }
                     } else {
                         // Dual-Layer Tunnel Ping Guard: Probe the live server address directly
@@ -3157,7 +3255,7 @@ public class ClusterGUI extends JFrame {
             // Create New Cluster Profile (Newcomers or adding secondary cluster)
             String defaultName = zipFile.getName().replace(".zip", "");
             if (defaultName.toLowerCase().startsWith("cohost-files") || defaultName.equalsIgnoreCase("cohost-starterpack")) {
-                defaultName = "Dorm-Craft-SMP";
+                defaultName = "Minecraft-Cluster";
             }
 
             String clusterName = JOptionPane.showInputDialog(this,

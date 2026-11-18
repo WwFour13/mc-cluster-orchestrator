@@ -104,12 +104,12 @@ The orchestrator includes a native dark-themed desktop application built with Ja
 │ MINECRAFT CLUSTER v2.1.5      [ Dashboard ]  [ Cluster Admin ]  [ Settings ]│
 ├────────────────────────────────────────────────────────────────────────┤
 │                                                                        │
-│ Dorm Craft SMP — Shared Cluster                       ● Active on MSI  │
+│ Minecraft SMP — Shared Cluster                       ● Active on Node-1  │
 │ Host: Desktop-Alpha | Storage: C:\dev\minecraft-server       ⟳ Refresh │
 │                                                                        │
 │ ┌──────────────────────┐  Memory Allocation: 8 GB                      │
 │ │ ▶ START CLUSTER SERVER│  [=====|============== 31 GB Total]           │
-│ └──────────────────────┘  Connection: jensen-edited.tun.ply.gg [COPY]  │
+│ └──────────────────────┘  Connection: cluster.playit.gg [COPY]         │
 │                                                                        │
 │ 1. Up to Date   2. Lock Acquired   3. Synchronized   4. Ready   5. LIVE │
 │ └──────────────────────────────────────────────────────────────────────┘

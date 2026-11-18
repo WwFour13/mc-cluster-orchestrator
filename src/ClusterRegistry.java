@@ -176,19 +176,17 @@ public class ClusterRegistry {
                 String json = Files.readString(localCfg);
                 String bucket = ServerLauncher.extractJsonString(json, "b2_bucket");
                 String domain = ServerLauncher.extractJsonString(json, "domain");
-                String name = "Dorm Craft SMP";
-                if (bucket.toLowerCase().contains("dorm")) {
-                    name = "Dorm Craft SMP";
-                } else if (!bucket.isEmpty()) {
+                String name = "Default Cluster";
+                if (!bucket.isEmpty()) {
                     name = bucket;
                 }
 
                 ClusterProfile defaultProfile = new ClusterProfile(
-                        "dorm-craft-smp",
+                        "default-cluster",
                         name,
                         fallbackRoot.toAbsolutePath().toString(),
                         bucket,
-                        domain.isEmpty() ? "jensen-edited.tun.ply.gg" : domain
+                        domain
                 );
                 clusters.add(defaultProfile);
                 activeClusterId = defaultProfile.id;
