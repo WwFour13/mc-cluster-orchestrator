@@ -20,7 +20,6 @@ if %ERRORLEVEL% neq 0 (
     ) else (
         echo [ERROR] 'javac' compiler not found on PATH or standard JDK directories.
         echo Please ensure JDK 11+ is installed.
-        pause
         exit /b 1
     )
 )
@@ -45,7 +44,6 @@ if exist "%ORCH_DIR%\sources.txt" del "%ORCH_DIR%\sources.txt"
 if !COMPILE_STATUS! neq 0 (
     echo [ERROR] Compilation failed.
     rd /s /q "%ORCH_DIR%\build_out"
-    pause
     exit /b !COMPILE_STATUS!
 )
 
@@ -64,7 +62,6 @@ if exist "!TARGET_DIR!\ServerLauncher.jar" (
     echo Successfully built and deployed ServerLauncher.jar to !TARGET_DIR!\
 ) else (
     echo [ERROR] Failed to package ServerLauncher.jar.
-    pause
     exit /b 1
 )
 

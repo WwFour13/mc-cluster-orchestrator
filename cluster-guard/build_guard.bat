@@ -21,7 +21,6 @@ if %ERRORLEVEL% neq 0 (
     ) else (
         echo [ERROR] 'javac' not found on PATH or standard JDK directories.
         echo Please ensure JDK 17+ is installed.
-        pause
         exit /b 1
     )
 )
@@ -49,7 +48,6 @@ echo [2/3] Compiling ClusterGuard.java...
 if %ERRORLEVEL% neq 0 (
     echo [ERROR] Plugin compilation failed!
     rd /s /q "%GUARD_DIR%\target-build"
-    pause
     exit /b %ERRORLEVEL%
 )
 

@@ -12,6 +12,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class ClusterGUI extends JFrame {
 
@@ -48,6 +49,8 @@ public class ClusterGUI extends JFrame {
     private JLabel statusBadge;
     private JLabel playerRadarBadge;
     private JLabel latencyRadarBadge;
+    private JComponent telemetryDiv1;
+    private JComponent telemetryDiv2;
     private javax.swing.Timer liveRadarTimer;
     private JLabel hostSubtitle;
     private JTextField ipAddressField;
@@ -78,6 +81,7 @@ public class ClusterGUI extends JFrame {
     private ModernButton adminForceUnlockBtn;
     private JLabel adminGenLabel;
     private JLabel adminCloudLabel;
+    private ModernButton refreshCloudBtn;
 
     // Settings Components
     private JTextField settingsStorageField;
@@ -106,6 +110,7 @@ public class ClusterGUI extends JFrame {
     private ModernButton refreshBtn;
     private javax.swing.Timer refreshCooldownTimer = null;
     private int refreshCooldownRemaining = 0;
+    private final AtomicBoolean isPollingCloud = new AtomicBoolean(false);
 
     public ClusterGUI(Path rootDir) {
         this.clusterRegistry = ClusterRegistry.getInstance(rootDir);
@@ -195,13 +200,13 @@ public class ClusterGUI extends JFrame {
         JPanel tabsBlock = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         tabsBlock.setOpaque(false);
 
-        navDashboardBtn = new ModernButton("🎮 Dashboard", COLOR_EMERALD, Color.WHITE, 12, 10);
-        navAdminBtn = new ModernButton("🛡️ Cluster Admin", COLOR_BG_CARD, COLOR_TEXT_MUTED, 12, 10);
-        navSettingsBtn = new ModernButton("⚙️ Settings", COLOR_BG_CARD, COLOR_TEXT_MUTED, 12, 10);
+        navDashboardBtn = new ModernButton("Dashboard", COLOR_EMERALD, Color.WHITE, 12, 10);
+        navAdminBtn = new ModernButton("Cluster Admin", COLOR_BG_CARD, COLOR_TEXT_MUTED, 12, 10);
+        navSettingsBtn = new ModernButton("Settings", COLOR_BG_CARD, COLOR_TEXT_MUTED, 12, 10);
 
-        navDashboardBtn.setPreferredSize(new Dimension(135, 36));
-        navAdminBtn.setPreferredSize(new Dimension(150, 36));
-        navSettingsBtn.setPreferredSize(new Dimension(120, 36));
+        navDashboardBtn.setPreferredSize(new Dimension(120, 36));
+        navAdminBtn.setPreferredSize(new Dimension(135, 36));
+        navSettingsBtn.setPreferredSize(new Dimension(110, 36));
 
         navDashboardBtn.addActionListener(e -> switchTab("TAB_DASHBOARD"));
         navAdminBtn.addActionListener(e -> switchTab("TAB_ADMIN"));
@@ -263,9 +268,6 @@ public class ClusterGUI extends JFrame {
         JPanel clusterRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         clusterRow.setOpaque(false);
 
-        JLabel iconLbl = new JLabel("🎮");
-        iconLbl.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 16));
-
         clusterSelector = new JComboBox<>();
         clusterSelector.setFont(new Font("Segoe UI", Font.BOLD, 14));
         clusterSelector.setPreferredSize(new Dimension(280, 32));
@@ -274,12 +276,11 @@ public class ClusterGUI extends JFrame {
         clusterSelectorListener = e -> onClusterSelected();
         refreshClusterSelectorItems();
 
-        ModernButton addClusterBtn = new ModernButton("➕", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 4);
+        ModernButton addClusterBtn = new ModernButton("+", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 14, 4);
         addClusterBtn.setToolTipText("Import or Create New Cluster Profile");
         addClusterBtn.setPreferredSize(new Dimension(36, 32));
         addClusterBtn.addActionListener(e -> showImportClusterDialog());
 
-        clusterRow.add(iconLbl);
         clusterRow.add(clusterSelector);
         clusterRow.add(addClusterBtn);
 
@@ -290,33 +291,50 @@ public class ClusterGUI extends JFrame {
         hostInfo.add(clusterRow);
         hostInfo.add(hostSubtitle);
 
-        JPanel radarBlock = new JPanel(new FlowLayout(FlowLayout.RIGHT, 12, 0));
-        radarBlock.setOpaque(false);
+        JPanel telemetryWrapper = new JPanel(new GridLayout(2, 1, 0, 4));
+        telemetryWrapper.setOpaque(false);
+
+        JPanel telemetryBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 12, 0));
+        telemetryBar.setOpaque(false);
+
         statusBadge = new JLabel("● Checking Cluster Availability...");
-        statusBadge.setFont(new Font("Segoe UI", Font.BOLD, 13));
+        statusBadge.setFont(new Font("Segoe UI", Font.BOLD, 12));
         statusBadge.setForeground(COLOR_TEXT_MUTED);
 
-        playerRadarBadge = new JLabel("👥 Offline");
-        playerRadarBadge.setFont(new Font("Segoe UI Emoji", Font.BOLD, 13));
+        telemetryDiv1 = new VerticalDivider(14);
+
+        playerRadarBadge = new JLabel("Offline");
+        playerRadarBadge.setFont(new Font("Segoe UI", Font.BOLD, 12));
         playerRadarBadge.setForeground(COLOR_TEXT_MUTED);
         playerRadarBadge.setToolTipText("Probing server status...");
 
-        latencyRadarBadge = new JLabel("⚡ --ms");
-        latencyRadarBadge.setFont(new Font("Segoe UI Emoji", Font.BOLD, 12));
+        telemetryDiv2 = new VerticalDivider(14);
+        telemetryDiv2.setVisible(false);
+
+        latencyRadarBadge = new JLabel("-- ms");
+        latencyRadarBadge.setFont(new Font("Segoe UI", Font.BOLD, 12));
         latencyRadarBadge.setForeground(COLOR_TEXT_MUTED);
         latencyRadarBadge.setVisible(false);
 
-        this.refreshBtn = new ModernButton("⟳ Refresh", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 8);
-        refreshBtn.setPreferredSize(new Dimension(95, 30));
+        this.refreshBtn = new ModernButton("Refresh", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
+        refreshBtn.setPreferredSize(new Dimension(74, 28));
         refreshBtn.addActionListener(e -> handleManualRefresh());
 
-        radarBlock.add(statusBadge);
-        radarBlock.add(playerRadarBadge);
-        radarBlock.add(latencyRadarBadge);
-        radarBlock.add(refreshBtn);
+        telemetryBar.add(statusBadge);
+        telemetryBar.add(telemetryDiv1);
+        telemetryBar.add(playerRadarBadge);
+        telemetryBar.add(telemetryDiv2);
+        telemetryBar.add(latencyRadarBadge);
+        telemetryBar.add(refreshBtn);
+
+        JPanel emptySpacer = new JPanel();
+        emptySpacer.setOpaque(false);
+
+        telemetryWrapper.add(telemetryBar);
+        telemetryWrapper.add(emptySpacer);
 
         subHeader.add(hostInfo, BorderLayout.WEST);
-        subHeader.add(radarBlock, BorderLayout.EAST);
+        subHeader.add(telemetryWrapper, BorderLayout.EAST);
 
         // Main Center Workspace
         JPanel center = new JPanel(new BorderLayout(0, 12));
@@ -369,7 +387,7 @@ public class ClusterGUI extends JFrame {
         // Right: Connection Address / Copy IP
         JPanel ipBlock = new JPanel(new GridLayout(2, 1, 0, 4));
         ipBlock.setOpaque(false);
-        ipBlock.setPreferredSize(new Dimension(220, 56));
+        ipBlock.setPreferredSize(new Dimension(290, 56));
 
         JLabel addrLabel = new JLabel("Connection Address (PlayIt):");
         addrLabel.setFont(new Font("Segoe UI", Font.BOLD, 11));
@@ -379,8 +397,9 @@ public class ClusterGUI extends JFrame {
         copyIpRow.setOpaque(false);
         ipAddressField = createDarkTextFieldWithText(resolveDynamicServerAddress());
         ipAddressField.setEditable(false);
+        ipAddressField.setToolTipText("Click 'COPY IP' to copy server address to clipboard");
         copyIpBtn = new ModernButton("COPY IP", COLOR_BLUE, Color.WHITE, 11, 6);
-        copyIpBtn.setPreferredSize(new Dimension(85, 28));
+        copyIpBtn.setPreferredSize(new Dimension(80, 28));
         copyIpBtn.addActionListener(e -> {
             copyToClipboard(ipAddressField.getText().trim());
             copyIpBtn.setText("COPIED!");
@@ -485,8 +504,9 @@ public class ClusterGUI extends JFrame {
         banner.setLayout(new BorderLayout(14, 0));
         banner.setBorder(new EmptyBorder(8, 14, 8, 14));
 
-        JLabel iconLbl = new JLabel("⚠️");
-        iconLbl.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 16));
+        JLabel iconLbl = new JLabel("!");
+        iconLbl.setFont(new Font("Segoe UI", Font.BOLD, 14));
+        iconLbl.setForeground(COLOR_AMBER);
 
         JLabel textLbl = new JLabel("<html><b>Cluster Credentials Required:</b> Paste your invite token to link cloud synchronization and unlock server hosting.</html>");
         textLbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
@@ -497,8 +517,8 @@ public class ClusterGUI extends JFrame {
         left.add(iconLbl);
         left.add(textLbl);
 
-        ModernButton enterKeyBtn = new ModernButton("🔑  Enter Invite Key", COLOR_AMBER, Color.WHITE, 11, 6);
-        enterKeyBtn.setPreferredSize(new Dimension(160, 30));
+        ModernButton enterKeyBtn = new ModernButton("Enter Invite Key", COLOR_AMBER, Color.WHITE, 11, 6);
+        enterKeyBtn.setPreferredSize(new Dimension(140, 30));
         enterKeyBtn.addActionListener(e -> showClusterTokenDialog());
 
         banner.add(left, BorderLayout.CENTER);
@@ -513,8 +533,9 @@ public class ClusterGUI extends JFrame {
         banner.setLayout(new BorderLayout(14, 0));
         banner.setBorder(new EmptyBorder(8, 14, 8, 14));
 
-        JLabel iconLbl = new JLabel("☕");
-        iconLbl.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 16));
+        JLabel iconLbl = new JLabel("!");
+        iconLbl.setFont(new Font("Segoe UI", Font.BOLD, 14));
+        iconLbl.setForeground(COLOR_AMBER);
 
         JLabel textLbl = new JLabel("<html><b>Java 25 LTS Required:</b> PaperMC 26.x requires Java 25 or higher to run.</html>");
         textLbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
@@ -528,12 +549,12 @@ public class ClusterGUI extends JFrame {
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         right.setOpaque(false);
 
-        ModernButton setupBtn = new ModernButton("⚡  Install / Setup Java 25", COLOR_AMBER, Color.WHITE, 11, 6);
-        setupBtn.setPreferredSize(new Dimension(170, 30));
+        ModernButton setupBtn = new ModernButton("Install / Setup Java 25", COLOR_AMBER, Color.WHITE, 11, 6);
+        setupBtn.setPreferredSize(new Dimension(160, 30));
         setupBtn.addActionListener(e -> showJava25SetupDialog());
 
-        ModernButton recheckBtn = new ModernButton("⟳  Re-Check", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
-        recheckBtn.setPreferredSize(new Dimension(95, 30));
+        ModernButton recheckBtn = new ModernButton("Re-Check", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
+        recheckBtn.setPreferredSize(new Dimension(85, 30));
         recheckBtn.addActionListener(e -> recheckJava25(true));
 
         right.add(setupBtn);
@@ -614,7 +635,7 @@ public class ClusterGUI extends JFrame {
         ));
         banner.setVisible(false);
 
-        updateBannerText = new JLabel("🚀 A new platform release is available on GitHub!");
+        updateBannerText = new JLabel("A new platform release is available on GitHub!");
         updateBannerText.setFont(new Font("Segoe UI", Font.BOLD, 12));
         updateBannerText.setForeground(COLOR_TEXT_PRIMARY);
 
@@ -663,7 +684,7 @@ public class ClusterGUI extends JFrame {
         ModernCard inviteCard = new ModernCard();
         inviteCard.setLayout(new BorderLayout(10, 8));
         inviteCard.setBorder(new EmptyBorder(14, 18, 14, 18));
-        inviteCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 115));
+        inviteCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 125));
 
         JLabel inviteTitle = new JLabel("COHOST ACCESS & INVITE KEY");
         inviteTitle.setFont(new Font("Segoe UI", Font.BOLD, 13));
@@ -711,26 +732,33 @@ public class ClusterGUI extends JFrame {
 
         // Section 1.5: Zero-Bandwidth Cohost Starter Pack (Export & Import)
         ModernCard starterPackCard = new ModernCard();
-        starterPackCard.setLayout(new BorderLayout(10, 8));
-        starterPackCard.setBorder(new EmptyBorder(14, 18, 14, 18));
-        starterPackCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 135));
+        starterPackCard.setLayout(new BorderLayout(10, 12));
+        starterPackCard.setBorder(new EmptyBorder(16, 20, 16, 20));
+        starterPackCard.setPreferredSize(new Dimension(0, 145));
+        starterPackCard.setMinimumSize(new Dimension(0, 135));
+        starterPackCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 160));
 
         JLabel starterTitle = new JLabel("CO-HOST SYNC PACK (ZERO CLOUD EGRESS)");
         starterTitle.setFont(new Font("Segoe UI", Font.BOLD, 13));
         starterTitle.setForeground(COLOR_EMERALD);
 
-        JLabel starterDesc = new JLabel("Export world, plugins, and runtime to 'cohost-files-YYYY-MM-DD.zip' to sync with co-hosts offline without spending Backblaze download quota.");
+        JLabel starterDesc = new JLabel("<html>Export world, plugins, and runtime to 'cohost-files-YYYY-MM-DD.zip' to sync with co-hosts offline without spending Backblaze download quota.</html>");
         starterDesc.setFont(new Font("Segoe UI", Font.PLAIN, 12));
         starterDesc.setForeground(COLOR_TEXT_MUTED);
+
+        JPanel textStack = new JPanel(new GridLayout(2, 1, 0, 4));
+        textStack.setOpaque(false);
+        textStack.add(starterTitle);
+        textStack.add(starterDesc);
 
         JPanel starterActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         starterActions.setOpaque(false);
 
-        ModernButton exportZipBtn = new ModernButton("📦 EXPORT COHOST FILES (.zip)", COLOR_EMERALD, Color.WHITE, 12, 8);
+        ModernButton exportZipBtn = new ModernButton("EXPORT COHOST FILES (.zip)", COLOR_EMERALD, Color.WHITE, 12, 8);
         exportZipBtn.setPreferredSize(new Dimension(240, 42));
         exportZipBtn.addActionListener(e -> exportStarterPackAction());
 
-        ModernButton importZipBtn = new ModernButton("📁 IMPORT COHOST FILES (.zip)", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 8);
+        ModernButton importZipBtn = new ModernButton("IMPORT COHOST FILES (.zip)", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 8);
         importZipBtn.setPreferredSize(new Dimension(240, 42));
         importZipBtn.addActionListener(e -> showImportClusterDialog());
 
@@ -738,20 +766,19 @@ public class ClusterGUI extends JFrame {
         starterActions.add(Box.createHorizontalStrut(12));
         starterActions.add(importZipBtn);
 
-        starterPackCard.add(starterTitle, BorderLayout.NORTH);
-        starterPackCard.add(starterDesc, BorderLayout.CENTER);
+        starterPackCard.add(textStack, BorderLayout.NORTH);
         starterPackCard.add(starterActions, BorderLayout.SOUTH);
 
         // Section 2: Operational Controls (Remote Stop, Force Unlock, & Cloud Config Sync)
         ModernCard opsCard = new ModernCard();
         opsCard.setLayout(new GridLayout(4, 1, 0, 10));
         opsCard.setBorder(new EmptyBorder(14, 18, 14, 18));
-        opsCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 260));
+        opsCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 275));
 
         // Sub-Card A: Remote Stop
         JPanel stopRow = new JPanel(new BorderLayout(12, 0));
         stopRow.setOpaque(false);
-        adminRemoteStopBtn = new ModernButton("⛔ REQUEST REMOTE STOP", COLOR_ROSE, Color.WHITE, 12, 8);
+        adminRemoteStopBtn = new ModernButton("REQUEST REMOTE STOP", COLOR_ROSE, Color.WHITE, 12, 8);
         adminRemoteStopBtn.setPreferredSize(new Dimension(240, 42));
         adminRemoteStopBtn.addActionListener(e -> handleRemoteStopRequest());
 
@@ -772,7 +799,7 @@ public class ClusterGUI extends JFrame {
         // Sub-Card B: Emergency Force Unlock
         JPanel unlockRow = new JPanel(new BorderLayout(12, 0));
         unlockRow.setOpaque(false);
-        adminForceUnlockBtn = new ModernButton("🔓 EMERGENCY FORCE UNLOCK", COLOR_AMBER, Color.WHITE, 12, 8);
+        adminForceUnlockBtn = new ModernButton("EMERGENCY FORCE UNLOCK", COLOR_AMBER, Color.WHITE, 12, 8);
         adminForceUnlockBtn.setPreferredSize(new Dimension(240, 42));
         adminForceUnlockBtn.addActionListener(e -> handleEmergencyUnlockRequest());
 
@@ -793,7 +820,7 @@ public class ClusterGUI extends JFrame {
         // Sub-Card C: Cloud Runtime & Config Distribution
         JPanel syncDistRow = new JPanel(new BorderLayout(12, 0));
         syncDistRow.setOpaque(false);
-        ModernButton adminSyncDistBtn = new ModernButton("☁️ SYNC CONFIGS & PLUGINS", COLOR_BLUE, Color.WHITE, 12, 8);
+        ModernButton adminSyncDistBtn = new ModernButton("SYNC CONFIGS & PLUGINS", COLOR_BLUE, Color.WHITE, 12, 8);
         adminSyncDistBtn.setPreferredSize(new Dimension(240, 42));
         adminSyncDistBtn.addActionListener(e -> handlePublishAdminDistribution(adminSyncDistBtn));
 
@@ -814,7 +841,7 @@ public class ClusterGUI extends JFrame {
         // Sub-Card D: Cloud Storage Cleanup
         JPanel cleanStorageRow = new JPanel(new BorderLayout(12, 0));
         cleanStorageRow.setOpaque(false);
-        ModernButton adminCleanStorageBtn = new ModernButton("🧹 CLEAN CLOUD STORAGE", COLOR_PURPLE, Color.WHITE, 12, 8);
+        ModernButton adminCleanStorageBtn = new ModernButton("CLEAN CLOUD STORAGE", COLOR_PURPLE, Color.WHITE, 12, 8);
         adminCleanStorageBtn.setPreferredSize(new Dimension(240, 42));
         adminCleanStorageBtn.addActionListener(e -> handleCleanStorage(adminCleanStorageBtn));
 
@@ -841,7 +868,7 @@ public class ClusterGUI extends JFrame {
         ModernCard stateCard = new ModernCard();
         stateCard.setLayout(new BorderLayout(12, 0));
         stateCard.setBorder(new EmptyBorder(14, 18, 14, 18));
-        stateCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 85));
+        stateCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 95));
 
         JPanel statsStack = new JPanel(new GridLayout(2, 1, 0, 4));
         statsStack.setOpaque(false);
@@ -858,13 +885,9 @@ public class ClusterGUI extends JFrame {
         JPanel folderActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
         folderActions.setOpaque(false);
 
-        ModernButton refreshCloudBtn = new ModernButton("↻ Refresh Cloud", COLOR_BG_CARD, COLOR_BLUE, 11, 6);
-        refreshCloudBtn.setToolTipText("Re-query Backblaze B2 for latest cloud world generation & status");
-        refreshCloudBtn.addActionListener(e -> {
-            adminGenLabel.setText("Active World Generation: Polling cloud...");
-            adminGenLabel.setForeground(COLOR_AMBER);
-            refreshAdminTabState();
-        });
+        refreshCloudBtn = new ModernButton("Refresh Cloud", COLOR_BG_CARD, COLOR_BLUE, 11, 6);
+        refreshCloudBtn.setToolTipText("Re-query Backblaze B2 for latest cloud world generation & status (15s cooldown)");
+        refreshCloudBtn.addActionListener(e -> handleManualRefresh());
 
         ModernButton openDirBtn = new ModernButton("Open Server Folder", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
         openDirBtn.addActionListener(e -> openPathInExplorer(rootDir));
@@ -889,8 +912,13 @@ public class ClusterGUI extends JFrame {
         body.add(Box.createVerticalGlue());
 
         panel.add(header, BorderLayout.NORTH);
-        panel.add(body, BorderLayout.CENTER);
-        panel.add(body, BorderLayout.CENTER);
+
+        JScrollPane adminScroll = new JScrollPane(body);
+        adminScroll.setBorder(null);
+        adminScroll.setOpaque(false);
+        adminScroll.getViewport().setOpaque(false);
+        adminScroll.getVerticalScrollBar().setUnitIncrement(16);
+        panel.add(adminScroll, BorderLayout.CENTER);
 
         return panel;
     }
@@ -911,7 +939,7 @@ public class ClusterGUI extends JFrame {
             adminCloudLabel.setText("Cloud Provider: Backblaze B2 (" + (bucket != null ? bucket : "") + ") | Initializing");
             adminCloudLabel.setForeground(COLOR_TEXT_MUTED);
         } else {
-            adminGenLabel.setText("Active World Generation: ⚠️ " + cloudCheck.status() + " (Local Base: #" + localGen + ")");
+            adminGenLabel.setText("Active World Generation: [Error: " + cloudCheck.status() + "] (Local Base: #" + localGen + ")");
             adminGenLabel.setForeground(COLOR_ROSE);
             adminGenLabel.setToolTipText(cloudCheck.detailMessage());
             adminCloudLabel.setText("Cloud Error: " + cloudCheck.detailMessage());
@@ -1033,14 +1061,14 @@ public class ClusterGUI extends JFrame {
         settingsTokenField.setFont(new Font("Consolas", Font.PLAIN, 12));
         settingsTokenField.setPreferredSize(new Dimension(0, 36));
 
-        ModernButton copyTokenBtn = new ModernButton("📋 Copy", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
+        ModernButton copyTokenBtn = new ModernButton("Copy", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 11, 6);
         copyTokenBtn.setPreferredSize(new Dimension(85, 36));
         copyTokenBtn.addActionListener(e -> {
             String val = settingsTokenField.getText().trim();
             if (!val.isEmpty()) {
                 Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(val), null);
-                copyTokenBtn.setText("✔ Copied!");
-                Timer t = new Timer(1500, ev -> copyTokenBtn.setText("📋 Copy"));
+                copyTokenBtn.setText("Copied!");
+                Timer t = new Timer(1500, ev -> copyTokenBtn.setText("Copy"));
                 t.setRepeats(false);
                 t.start();
             }
@@ -1099,7 +1127,7 @@ public class ClusterGUI extends JFrame {
         hbLbl.setFont(new Font("Segoe UI", Font.BOLD, 12));
         hbLbl.setForeground(COLOR_TEXT_MUTED);
         hbBlock.add(hbLbl);
-        settingsHeartbeatSpinner = new JSpinner(new SpinnerNumberModel(120, 30, 600, 10));
+        settingsHeartbeatSpinner = new JSpinner(new SpinnerNumberModel(300, 30, 600, 10));
         styleDarkSpinner(settingsHeartbeatSpinner, 85, 32);
         hbBlock.add(settingsHeartbeatSpinner);
 
@@ -1170,7 +1198,7 @@ public class ClusterGUI extends JFrame {
         JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         footer.setOpaque(false);
 
-        ModernButton saveBtn = new ModernButton("💾  Save Configuration", COLOR_EMERALD, Color.WHITE, 13, 8);
+        ModernButton saveBtn = new ModernButton("Save Configuration", COLOR_EMERALD, Color.WHITE, 13, 8);
         saveBtn.setPreferredSize(new Dimension(180, 40));
         saveBtn.addActionListener(e -> saveSettingsFromFields());
 
@@ -1220,8 +1248,8 @@ public class ClusterGUI extends JFrame {
             settingsAppKeyField.setText(appKey != null ? appKey : "");
             settingsBwLimitField.setText(bw != null ? bw : "");
 
-            settingsHeartbeatSpinner.setValue(ServerLauncher.extractJsonInt(json, "heartbeat_seconds", 120));
-            settingsAutosaveSpinner.setValue(ServerLauncher.extractJsonInt(json, "save_interval_minutes", 15));
+            settingsHeartbeatSpinner.setValue(ServerLauncher.extractJsonInt(json, "heartbeat_seconds", 300));
+            settingsAutosaveSpinner.setValue(ServerLauncher.extractJsonInt(json, "save_interval_minutes", 60));
 
             if (bucket != null && keyId != null && appKey != null && !bucket.isEmpty() && !keyId.isEmpty() && !appKey.isEmpty()) {
                 String domain = ServerLauncher.extractJsonString(json, "domain");
@@ -1292,7 +1320,7 @@ public class ClusterGUI extends JFrame {
             sb.append("  \"b2_key_id\": \"").append(settingsKeyIdField.getText().trim().replaceAll("[^a-zA-Z0-9]", "")).append("\",\n");
             sb.append("  \"b2_application_key\": \"").append(settingsAppKeyField.getText().trim()).append("\",\n");
             sb.append("  \"java_memory\": \"").append(ramSlider.getValue()).append("G\",\n");
-            sb.append("  \"stale_timeout_minutes\": 10,\n");
+            sb.append("  \"stale_timeout_minutes\": 12,\n");
             sb.append("  \"b2_bandwidth_limit\": \"").append(settingsBwLimitField.getText().trim()).append("\",\n");
             sb.append("  \"heartbeat_seconds\": ").append(settingsHeartbeatSpinner.getValue()).append(",\n");
             sb.append("  \"save_interval_minutes\": ").append(settingsAutosaveSpinner.getValue());
@@ -1356,7 +1384,7 @@ public class ClusterGUI extends JFrame {
         createCard.setLayout(new BorderLayout(0, 14));
         createCard.setBorder(new EmptyBorder(26, 24, 26, 24));
 
-        JLabel createIconTitle = new JLabel("👑 CREATE A CLUSTER", SwingConstants.CENTER);
+        JLabel createIconTitle = new JLabel("CREATE A CLUSTER", SwingConstants.CENTER);
         createIconTitle.setFont(new Font("Segoe UI", Font.BOLD, 17));
         createIconTitle.setForeground(COLOR_EMERALD);
 
@@ -1381,7 +1409,7 @@ public class ClusterGUI extends JFrame {
         joinCard.setLayout(new BorderLayout(0, 14));
         joinCard.setBorder(new EmptyBorder(26, 24, 26, 24));
 
-        JLabel joinIconTitle = new JLabel("👥 JOIN A CLUSTER", SwingConstants.CENTER);
+        JLabel joinIconTitle = new JLabel("JOIN A CLUSTER", SwingConstants.CENTER);
         joinIconTitle.setFont(new Font("Segoe UI", Font.BOLD, 17));
         joinIconTitle.setForeground(COLOR_BLUE);
 
@@ -1406,7 +1434,7 @@ public class ClusterGUI extends JFrame {
         starterCard.setLayout(new BorderLayout(0, 14));
         starterCard.setBorder(new EmptyBorder(26, 24, 26, 24));
 
-        JLabel starterIconTitle = new JLabel("📦 CO-HOST SYNC PACK", SwingConstants.CENTER);
+        JLabel starterIconTitle = new JLabel("CO-HOST SYNC PACK", SwingConstants.CENTER);
         starterIconTitle.setFont(new Font("Segoe UI", Font.BOLD, 17));
         starterIconTitle.setForeground(COLOR_AMBER);
 
@@ -1467,14 +1495,14 @@ public class ClusterGUI extends JFrame {
         srcTitle.setFont(new Font("Segoe UI", Font.BOLD, 13));
         srcTitle.setForeground(COLOR_TEXT_PRIMARY);
 
-        JRadioButton freshRadio = new JRadioButton("✨  CREATE A FRESH SERVER FROM SCRATCH (Auto-Download Official Paper)", true);
+        JRadioButton freshRadio = new JRadioButton("CREATE A FRESH SERVER FROM SCRATCH (Auto-Download Official Paper)", true);
         freshRadio.setForeground(COLOR_TEXT_PRIMARY);
         freshRadio.setOpaque(false);
 
         JComboBox<String> versionCombo = new JComboBox<>(PaperDownloader.SUPPORTED_VERSIONS);
         styleDarkComboBox(versionCombo);
 
-        JRadioButton adoptRadio = new JRadioButton("📁  ADOPT AN EXISTING SERVER (Convert local world, Paper server, and plugins)");
+        JRadioButton adoptRadio = new JRadioButton("ADOPT AN EXISTING SERVER (Convert local world, Paper server, and plugins)");
         adoptRadio.setForeground(COLOR_TEXT_PRIMARY);
         adoptRadio.setOpaque(false);
 
@@ -1773,10 +1801,10 @@ public class ClusterGUI extends JFrame {
         sb.append("  \"b2_key_id\": \"").append(keyId).append("\",\n");
         sb.append("  \"b2_application_key\": \"").append(appKey).append("\",\n");
         sb.append("  \"java_memory\": \"").append(javaMem).append("\",\n");
-        sb.append("  \"stale_timeout_minutes\": 10,\n");
+        sb.append("  \"stale_timeout_minutes\": 12,\n");
         sb.append("  \"b2_bandwidth_limit\": \"10M\",\n");
-        sb.append("  \"heartbeat_seconds\": 120,\n");
-        sb.append("  \"save_interval_minutes\": 15\n");
+        sb.append("  \"heartbeat_seconds\": 300,\n");
+        sb.append("  \"save_interval_minutes\": 60\n");
         sb.append("}\n");
         try {
             Files.writeString(cfg, sb.toString());
@@ -1814,12 +1842,12 @@ public class ClusterGUI extends JFrame {
             if (isServerRunning || primaryActionBtn == null) return;
             boolean configured = isConfigured();
             if (!configured) {
-                primaryActionBtn.setText("🔑  ENTER CLUSTER TOKEN");
+                primaryActionBtn.setText("ENTER CLUSTER TOKEN");
                 primaryActionBtn.setBackgroundColor(COLOR_AMBER);
                 primaryActionBtn.setEnabled(true);
                 if (unconfiguredBanner != null) unconfiguredBanner.setVisible(true);
             } else if (cachedJava25Bin == null) {
-                primaryActionBtn.setText("⚠️  JAVA 25 LTS REQUIRED");
+                primaryActionBtn.setText("JAVA 25 LTS REQUIRED");
                 primaryActionBtn.setBackgroundColor(COLOR_AMBER);
                 primaryActionBtn.setEnabled(true);
                 if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
@@ -1827,7 +1855,7 @@ public class ClusterGUI extends JFrame {
             } else if (lastCloudGenerationResult != null &&
                        lastCloudGenerationResult.status() != ServerLauncher.CloudGenerationResult.Status.OK &&
                        lastCloudGenerationResult.status() != ServerLauncher.CloudGenerationResult.Status.FRESH_BUCKET) {
-                primaryActionBtn.setText("⚠️  CLOUD STATE INDETERMINATE");
+                primaryActionBtn.setText("CLOUD STATE INDETERMINATE");
                 primaryActionBtn.setBackgroundColor(COLOR_AMBER);
                 primaryActionBtn.setEnabled(true);
                 if (unconfiguredBanner != null) unconfiguredBanner.setVisible(false);
@@ -1865,9 +1893,9 @@ public class ClusterGUI extends JFrame {
                 String javaMemory = ServerLauncher.extractJsonString(json, "java_memory");
                 if (javaMemory == null || javaMemory.isEmpty()) javaMemory = "6G";
 
-                int staleMin = ServerLauncher.extractJsonInt(json, "stale_timeout_minutes", 10);
-                int heartbeatSec = ServerLauncher.extractJsonInt(json, "heartbeat_seconds", 120);
-                int saveIntervalMin = ServerLauncher.extractJsonInt(json, "save_interval_minutes", 15);
+                int staleMin = ServerLauncher.extractJsonInt(json, "stale_timeout_minutes", 12);
+                int heartbeatSec = ServerLauncher.extractJsonInt(json, "heartbeat_seconds", 300);
+                int saveIntervalMin = ServerLauncher.extractJsonInt(json, "save_interval_minutes", 60);
                 String bwLimit = ServerLauncher.extractJsonString(json, "b2_bandwidth_limit");
                 if (bwLimit == null || bwLimit.isEmpty()) bwLimit = "10M";
 
@@ -1961,7 +1989,7 @@ public class ClusterGUI extends JFrame {
                     appendConsoleLog(String.format("[B2 Sync] Local base matches Cloud Generation #%d. Zero-egress bypass active (0 MB downloaded).", cloudGen));
                     updateMilestoneStep(2, "3. Synchronized (0 MB)", COLOR_EMERALD, 65);
                 } else {
-                    double estMb = ServerLauncher.estimateEgressMb(rootDir, rclone, b2Target);
+                    double estMb = ServerLauncher.estimateEgressMb(rootDir, rclone, b2Target, cloudGen);
                     appendConsoleLog(String.format("[B2 Sync] Cloud sync volume: %.1f MB estimated.", estMb));
                     if (estMb > 600.0 || (estMb > 0 && ServerLauncher.isWorldEmpty(rootDir))) {
                         ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
@@ -1993,7 +2021,7 @@ public class ClusterGUI extends JFrame {
                     }
 
                     ServerLauncher.syncAdminDistribution(rootDir, rclone, b2Target);
-                    boolean syncOk = ServerLauncher.pullFromB2(rootDir, rclone, b2Target, staleMin, true);
+                    boolean syncOk = ServerLauncher.pullFromB2(rootDir, rclone, b2Target, staleMin, true, cloudGen, estMb);
                     if (!syncOk) {
                         appendConsoleLog("[ABORT] World synchronization failed.");
                         ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
@@ -2271,6 +2299,18 @@ public class ClusterGUI extends JFrame {
             refreshBtn.setEnabled(false);
             refreshBtn.setText("⟳ 15s");
         }
+        if (refreshCloudBtn != null) {
+            refreshCloudBtn.setEnabled(false);
+            refreshCloudBtn.setText("⟳ 15s");
+        }
+        if (adminGenLabel != null) {
+            adminGenLabel.setText("Active World Generation: Polling cloud...");
+            adminGenLabel.setForeground(COLOR_AMBER);
+        }
+        if (adminCloudLabel != null) {
+            adminCloudLabel.setText("Querying Backblaze B2 for latest world state...");
+            adminCloudLabel.setForeground(COLOR_AMBER);
+        }
         if (refreshCooldownTimer != null && refreshCooldownTimer.isRunning()) {
             refreshCooldownTimer.stop();
         }
@@ -2280,6 +2320,9 @@ public class ClusterGUI extends JFrame {
                 if (refreshBtn != null) {
                     refreshBtn.setText("⟳ " + refreshCooldownRemaining + "s");
                 }
+                if (refreshCloudBtn != null) {
+                    refreshCloudBtn.setText("⟳ " + refreshCooldownRemaining + "s");
+                }
             } else {
                 if (refreshCooldownTimer != null) {
                     refreshCooldownTimer.stop();
@@ -2287,6 +2330,10 @@ public class ClusterGUI extends JFrame {
                 if (refreshBtn != null) {
                     refreshBtn.setEnabled(true);
                     refreshBtn.setText("⟳ Refresh");
+                }
+                if (refreshCloudBtn != null) {
+                    refreshCloudBtn.setEnabled(true);
+                    refreshCloudBtn.setText("Refresh Cloud");
                 }
             }
         });
@@ -2335,8 +2382,20 @@ public class ClusterGUI extends JFrame {
             return;
         }
 
+        if (!isPollingCloud.compareAndSet(false, true)) {
+            return;
+        }
+
         statusBadge.setText("● Polling Cloud...");
-        statusBadge.setForeground(COLOR_TEXT_MUTED);
+        statusBadge.setForeground(COLOR_AMBER);
+        if (adminGenLabel != null) {
+            adminGenLabel.setText("Active World Generation: Polling cloud...");
+            adminGenLabel.setForeground(COLOR_AMBER);
+        }
+        if (adminCloudLabel != null) {
+            adminCloudLabel.setText("Querying Backblaze B2 for latest world state...");
+            adminCloudLabel.setForeground(COLOR_AMBER);
+        }
         updatePrimaryButtonState();
 
         workerPool.submit(() -> {
@@ -2359,7 +2418,7 @@ public class ClusterGUI extends JFrame {
 
                 SwingUtilities.invokeLater(() -> {
                     if (minCloudVer != null && ServerLauncher.compareVersions(ServerLauncher.APP_VERSION, minCloudVer) < 0) {
-                        updateBannerText.setText("⚠️ Cloud World Requires Orchestrator v" + minCloudVer + " (Local is v" + ServerLauncher.APP_VERSION + "). Please update!");
+                        updateBannerText.setText("Notice: Cloud World Requires Orchestrator v" + minCloudVer + " (Local is v" + ServerLauncher.APP_VERSION + "). Please update!");
                         updateBanner.setVisible(true);
                     }
                     if (isServerRunning) {
@@ -2404,6 +2463,8 @@ public class ClusterGUI extends JFrame {
                     statusBadge.setText("● Status Check Failed");
                     statusBadge.setForeground(COLOR_TEXT_MUTED);
                 });
+            } finally {
+                isPollingCloud.set(false);
             }
         });
     }
@@ -2585,7 +2646,7 @@ public class ClusterGUI extends JFrame {
                             "Server configurations and plugins were published to the cloud successfully!\nAll co-hosts will automatically receive them on their next session.",
                             "Cloud Sync Complete", JOptionPane.INFORMATION_MESSAGE);
                     Timer t = new Timer(2000, ev -> {
-                        btn.setText("☁️ SYNC CONFIGS & PLUGINS");
+                        btn.setText("SYNC CONFIGS & PLUGINS");
                         btn.setEnabled(true);
                     });
                     t.setRepeats(false);
@@ -2638,7 +2699,7 @@ public class ClusterGUI extends JFrame {
                                 "Storage cleanup complete!\nAll hidden chunk revisions have been purged while preserving the latest save.",
                                 "Storage Cleaned", JOptionPane.INFORMATION_MESSAGE);
                         Timer t = new Timer(2000, ev -> {
-                            btn.setText("🧹 CLEAN CLOUD STORAGE");
+                            btn.setText("CLEAN CLOUD STORAGE");
                             btn.setEnabled(true);
                         });
                         t.setRepeats(false);
@@ -2666,7 +2727,7 @@ public class ClusterGUI extends JFrame {
                 .thenAccept(info -> {
                     if (info.hasUpdate() && info.downloadUrl() != null) {
                         SwingUtilities.invokeLater(() -> {
-                            updateBannerText.setText("🚀 New Release Available: v" + info.latestVersion() + "! Click to update.");
+                            updateBannerText.setText("New Release Available: v" + info.latestVersion() + "! Click to update.");
                             updateBanner.setVisible(true);
 
                             updateDownloadBtn.addActionListener(e -> {
@@ -2716,12 +2777,15 @@ public class ClusterGUI extends JFrame {
                 if (targetAddr == null || targetAddr.isBlank() || targetAddr.equals("Connecting...")) {
                     SwingUtilities.invokeLater(() -> {
                         if (playerRadarBadge != null) {
-                            playerRadarBadge.setText("👥 Offline");
+                            playerRadarBadge.setText("Offline");
                             playerRadarBadge.setForeground(COLOR_TEXT_MUTED);
                             playerRadarBadge.setToolTipText("No server endpoint configured");
                         }
                         if (latencyRadarBadge != null) {
                             latencyRadarBadge.setVisible(false);
+                        }
+                        if (telemetryDiv2 != null) {
+                            telemetryDiv2.setVisible(false);
                         }
                     });
                     return;
@@ -2731,7 +2795,7 @@ public class ClusterGUI extends JFrame {
                 SwingUtilities.invokeLater(() -> {
                     if (pr.isOnline) {
                         if (playerRadarBadge != null) {
-                            playerRadarBadge.setText(String.format("👥 %d / %d Online", pr.onlinePlayers, pr.maxPlayers));
+                            playerRadarBadge.setText(String.format("%d / %d Online", pr.onlinePlayers, pr.maxPlayers));
                             playerRadarBadge.setForeground(COLOR_EMERALD);
 
                             String displayAddr = isServerRunning ? "127.0.0.1:25565 (Local Host)" : targetAddr;
@@ -2750,7 +2814,7 @@ public class ClusterGUI extends JFrame {
                             playerRadarBadge.setToolTipText(tip.toString());
                         }
                         if (latencyRadarBadge != null) {
-                            latencyRadarBadge.setText(String.format("⚡ %dms", pr.latencyMs));
+                            latencyRadarBadge.setText(String.format("%d ms", pr.latencyMs));
                             if (pr.latencyMs < 75) {
                                 latencyRadarBadge.setForeground(COLOR_EMERALD);
                             } else if (pr.latencyMs < 180) {
@@ -2761,20 +2825,26 @@ public class ClusterGUI extends JFrame {
                             latencyRadarBadge.setToolTipText("Roundtrip ping to Minecraft server: " + pr.latencyMs + " ms");
                             latencyRadarBadge.setVisible(true);
                         }
+                        if (telemetryDiv2 != null) {
+                            telemetryDiv2.setVisible(true);
+                        }
                     } else {
                         if (playerRadarBadge != null) {
                             if (isServerRunning) {
-                                playerRadarBadge.setText("👥 Starting...");
+                                playerRadarBadge.setText("Starting...");
                                 playerRadarBadge.setForeground(COLOR_AMBER);
                                 playerRadarBadge.setToolTipText("Server process is initializing, awaiting port 25565 bind...");
                             } else {
-                                playerRadarBadge.setText("👥 Offline");
+                                playerRadarBadge.setText("Offline");
                                 playerRadarBadge.setForeground(COLOR_TEXT_MUTED);
                                 playerRadarBadge.setToolTipText("Server is offline at " + escapeHtml(targetAddr));
                             }
                         }
                         if (latencyRadarBadge != null) {
                             latencyRadarBadge.setVisible(false);
+                        }
+                        if (telemetryDiv2 != null) {
+                            telemetryDiv2.setVisible(false);
                         }
                     }
                 });
@@ -3049,7 +3119,7 @@ public class ClusterGUI extends JFrame {
                 if (choice == 0) {
                     // In-Place Update for Existing Hoster
                     appendConsoleLog("[Co-host Sync] Updating active cluster from " + zipFile.getName() + "...");
-                    ProgressModal modal = new ProgressModal(this, "📦 Updating Active Cluster", "Extracting files from " + zipFile.getName() + "...", COLOR_BLUE);
+                    ProgressModal modal = new ProgressModal(this, "Updating Active Cluster", "Extracting files from " + zipFile.getName() + "...", COLOR_BLUE);
                     modal.showAsync();
                     workerPool.submit(() -> {
                         try {
@@ -3114,7 +3184,7 @@ public class ClusterGUI extends JFrame {
             final String finalClusterName = clusterName;
             appendConsoleLog("[Co-host Sync] Importing cluster into " + targetDir + "...");
 
-            ProgressModal modal = new ProgressModal(this, "📦 Importing Co-Host Starter Pack", "Unpacking world files, plugins, and binaries (0 MB egress)...", COLOR_AMBER);
+            ProgressModal modal = new ProgressModal(this, "Importing Co-Host Starter Pack", "Unpacking world files, plugins, and binaries (0 MB egress)...", COLOR_AMBER);
             modal.showAsync();
 
             workerPool.submit(() -> {
@@ -3168,7 +3238,7 @@ public class ClusterGUI extends JFrame {
         dialog.setLayout(new BorderLayout(0, 16));
         ((JPanel) dialog.getContentPane()).setBorder(new EmptyBorder(20, 24, 20, 24));
 
-        JLabel titleLbl = new JLabel("🔑  ENTER CLUSTER INVITE TOKEN");
+        JLabel titleLbl = new JLabel("ENTER CLUSTER INVITE TOKEN");
         titleLbl.setFont(new Font("Segoe UI", Font.BOLD, 15));
         titleLbl.setForeground(COLOR_AMBER);
 
@@ -3315,7 +3385,7 @@ public class ClusterGUI extends JFrame {
         // Header
         JPanel headerPanel = new JPanel(new GridLayout(2, 1, 0, 6));
         headerPanel.setOpaque(false);
-        JLabel titleLbl = new JLabel("☕  JAVA 25 LTS REQUIRED TO HOST");
+        JLabel titleLbl = new JLabel("JAVA 25 LTS REQUIRED TO HOST");
         titleLbl.setFont(new Font("Segoe UI", Font.BOLD, 16));
         titleLbl.setForeground(COLOR_AMBER);
 
@@ -3342,7 +3412,7 @@ public class ClusterGUI extends JFrame {
         opt1Lbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
         opt1Lbl.setForeground(COLOR_TEXT_PRIMARY);
 
-        ModernButton wingetBtn = new ModernButton("⚡  Install via Terminal", COLOR_BLUE, Color.WHITE, 12, 6);
+        ModernButton wingetBtn = new ModernButton("Install via Terminal", COLOR_BLUE, Color.WHITE, 12, 6);
         wingetBtn.setPreferredSize(new Dimension(175, 34));
         wingetBtn.addActionListener(e -> launchWingetJava25Install());
         opt1.add(opt1Lbl, BorderLayout.CENTER);
@@ -3355,7 +3425,7 @@ public class ClusterGUI extends JFrame {
         opt2Lbl.setFont(new Font("Segoe UI", Font.PLAIN, 12));
         opt2Lbl.setForeground(COLOR_TEXT_PRIMARY);
 
-        ModernButton webBtn = new ModernButton("🌐  Open Download Page", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 6);
+        ModernButton webBtn = new ModernButton("Open Download Page", COLOR_BG_CARD, COLOR_TEXT_PRIMARY, 12, 6);
         webBtn.setPreferredSize(new Dimension(175, 34));
         webBtn.addActionListener(e -> openWebUrl("https://adoptium.net/temurin/releases/?version=25"));
         opt2.add(opt2Lbl, BorderLayout.CENTER);
@@ -3467,10 +3537,10 @@ public class ClusterGUI extends JFrame {
         sb.append("  \"b2_key_id\": \"").append(cfg.keyId().trim().replaceAll("[^a-zA-Z0-9]", "")).append("\",\n");
         sb.append("  \"b2_application_key\": \"").append(cfg.appKey().trim()).append("\",\n");
         sb.append("  \"java_memory\": \"").append(ramSlider != null ? ramSlider.getValue() + "G" : "6G").append("\",\n");
-        sb.append("  \"stale_timeout_minutes\": ").append(cfg.staleMinutes() > 0 ? cfg.staleMinutes() : 10).append(",\n");
+        sb.append("  \"stale_timeout_minutes\": ").append(cfg.staleMinutes() > 0 ? cfg.staleMinutes() : 12).append(",\n");
         sb.append("  \"b2_bandwidth_limit\": \"").append(cfg.bandwidthLimit() != null && !cfg.bandwidthLimit().isEmpty() ? cfg.bandwidthLimit().trim() : "10M").append("\",\n");
-        sb.append("  \"heartbeat_seconds\": 120,\n");
-        sb.append("  \"save_interval_minutes\": 15");
+        sb.append("  \"heartbeat_seconds\": 300,\n");
+        sb.append("  \"save_interval_minutes\": 60");
         String domain = cfg.domain();
         if (domain == null || domain.trim().isEmpty()) {
             domain = ServerLauncher.resolvePlayitAddressFromToml(rootDir);
@@ -3825,6 +3895,28 @@ public class ClusterGUI extends JFrame {
                 dialog.setVisible(false);
                 dialog.dispose();
             });
+        }
+    }
+
+    public static class VerticalDivider extends JComponent {
+        private final int dividerHeight;
+
+        public VerticalDivider(int height) {
+            this.dividerHeight = height;
+            setPreferredSize(new Dimension(1, height));
+            setMinimumSize(new Dimension(1, height));
+            setMaximumSize(new Dimension(1, height));
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setColor(COLOR_BORDER);
+            int y = (getHeight() - dividerHeight) / 2;
+            g2.drawLine(0, Math.max(0, y), 0, Math.max(0, y) + dividerHeight);
+            g2.dispose();
         }
     }
 }
