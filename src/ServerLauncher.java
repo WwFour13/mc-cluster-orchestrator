@@ -20,7 +20,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.10";
+    public static final String APP_VERSION = "2.1.11";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -31,8 +31,8 @@ public class ServerLauncher {
     private static Process activeMcProcess = null;
     private static Process activePlayitProcess = null;
     private static BufferedWriter activeMcStdin = null;
-    private static final AtomicBoolean remoteStopTriggered = new AtomicBoolean(false);
-    private static final AtomicLong lastStopSignalCheckMs = new AtomicLong(0);
+    static final AtomicBoolean remoteStopTriggered = new AtomicBoolean(false);
+    static final AtomicLong lastStopSignalCheckMs = new AtomicLong(0);
     public static final AtomicBoolean emergencyModeActive = new AtomicBoolean(false);
     private static final AtomicBoolean isPushActive = new AtomicBoolean(false);
     private static volatile CompletableFuture<?> activeIncrementalPush = null;
@@ -751,7 +751,7 @@ public class ServerLauncher {
     public static void dispatchRemoteStop(Path rootDir, String rclone, String b2Target, String host, String reason) {
         String json = String.format("{\"requested_by\":\"%s\",\"reason\":\"%s\",\"timestamp\":\"%s\"}",
                 host, reason.replace("\"", "\\\""), DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
-        runCommandWithInput(json, rootDir, rclone, "rcat", b2Target + "/remote_stop.signal");
+        runCommandWithInput(json, rootDir, rclone, "rcat", b2Target + "/remote_stop.signal", "--s3-no-head", "--s3-no-head-object");
         System.out.println("\n========================================================");
         System.out.println("[SUCCESS] Remote stop signal dispatched to Backblaze B2!");
         System.out.printf("  Reason: %s%n", reason);
@@ -830,6 +830,31 @@ public class ServerLauncher {
                     System.err.println("[B2 Sync] Download cancelled by user.");
                     return false;
                 }
+            }
+        }
+
+        // Newer-Local-File Guard: If local world exists and was modified AFTER the cloud generation timestamp,
+        // do not blindly overwrite local files!
+        if (rootDir != null && !isWorldEmpty(rootDir)) {
+            Path localLevel = rootDir.resolve("world").resolve("level.dat");
+            if (Files.exists(localLevel)) {
+                try {
+                    Instant localMod = Files.getLastModifiedTime(localLevel).toInstant();
+                    CloudGenerationResult cGen = checkCloudGeneration(rootDir, rclone, b2Target);
+                    if (cGen.timestamp() != null && !cGen.timestamp().isEmpty()) {
+                        Instant cloudInstant = Instant.parse(cGen.timestamp());
+                        if (localMod.isAfter(cloudInstant.plus(Duration.ofMinutes(10)))) {
+                            System.err.println("\n========================================================");
+                            System.err.println("[CONFLICT DETECTED] Local world files are NEWER than cloud generation!");
+                            System.err.printf("  Local world modified : %s%n", localMod);
+                            System.err.printf("  Cloud manifest time  : %s%n", cloudInstant);
+                            System.err.println("  Inbound pull halted to prevent overwriting newer unpushed progress.");
+                            System.err.println("  Tip: If this machine holds the active progress, verify base generation.");
+                            System.err.println("========================================================\n");
+                            return false;
+                        }
+                    }
+                } catch (Exception ignored) {}
             }
         }
 
@@ -1005,10 +1030,15 @@ public class ServerLauncher {
             int generation,
             Status status,
             String detailMessage,
-            String minOrchestratorVersion
+            String minOrchestratorVersion,
+            String timestamp
     ) {
         public CloudGenerationResult(int generation, Status status, String detailMessage) {
-            this(generation, status, detailMessage, null);
+            this(generation, status, detailMessage, null, null);
+        }
+
+        public CloudGenerationResult(int generation, Status status, String detailMessage, String minOrchestratorVersion) {
+            this(generation, status, detailMessage, minOrchestratorVersion, null);
         }
 
         public enum Status {
@@ -1089,7 +1119,7 @@ public class ServerLauncher {
     public static void releaseCloudLock(Path rootDir, String rclone, String b2Target) {
         activeLockId = null;
         String tombstone = "{\"host\":\"\",\"lock_id\":\"\",\"released\":true,\"timestamp\":\"1970-01-01T00:00:00Z\"}";
-        runCommandWithInput(15, tombstone, rootDir, rclone, "rcat", b2Target + "/cluster.lock");
+        runCommandWithInput(15, tombstone, rootDir, rclone, "rcat", b2Target + "/cluster.lock", "--s3-no-head", "--s3-no-head-object");
     }
 
     public static CommandResult writeCloudHeartbeat(Path rootDir, String rclone, String b2Target, String host) {
@@ -1102,7 +1132,7 @@ public class ServerLauncher {
                         host, lockId, DateTimeFormatter.ISO_INSTANT.format(Instant.now()))
                 : String.format("{\"host\":\"%s\",\"released\":false,\"timestamp\":\"%s\"}",
                         host, DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
-        return runCommandWithInput(15, lockJson, rootDir, rclone, "rcat", b2Target + "/cluster.lock");
+        return runCommandWithInput(15, lockJson, rootDir, rclone, "rcat", b2Target + "/cluster.lock", "--s3-no-head", "--s3-no-head-object");
     }
 
     public static CloudGenerationResult checkCloudGeneration(Path rootDir, String rclone, String b2Target) {
@@ -1114,8 +1144,9 @@ public class ServerLauncher {
         if (res.exitCode == 0 && !res.stdout.isEmpty()) {
             int gen = extractJsonInt(res.stdout, "generation", -1);
             String minVer = extractJsonString(res.stdout, "min_orchestrator_version");
+            String ts = extractJsonString(res.stdout, "timestamp");
             if (gen > 0) {
-                return new CloudGenerationResult(gen, CloudGenerationResult.Status.OK, "Verified Cloud Generation #" + gen, minVer);
+                return new CloudGenerationResult(gen, CloudGenerationResult.Status.OK, "Verified Cloud Generation #" + gen, minVer, ts);
             } else {
                 return new CloudGenerationResult(-1, CloudGenerationResult.Status.CORRUPT_JSON, "Corrupted manifest.json in cloud (Missing 'generation' key)");
             }
@@ -1157,7 +1188,7 @@ public class ServerLauncher {
     public static void writeCloudGeneration(Path rootDir, String rclone, String b2Target, int gen, String host) {
         String json = String.format("{\"generation\":%d,\"last_host\":\"%s\",\"timestamp\":\"%s\",\"orchestrator_version\":\"%s\",\"min_orchestrator_version\":\"%s\"}",
                 gen, host, DateTimeFormatter.ISO_INSTANT.format(Instant.now()), APP_VERSION, APP_VERSION);
-        runCommandWithInput(15, json, rootDir, rclone, "rcat", b2Target + "/manifest.json");
+        runCommandWithInput(15, json, rootDir, rclone, "rcat", b2Target + "/manifest.json", "--s3-no-head", "--s3-no-head-object");
     }
 
     public static String readCloudMinVersion(Path rootDir, String rclone, String b2Target) {
@@ -1190,6 +1221,7 @@ public class ServerLauncher {
     }
 
     public static int readLocalGeneration(Path rootDir) {
+        if (rootDir == null) return 1;
         Path sessionFile = rootDir.resolve(".cluster_session");
         if (Files.exists(sessionFile)) {
             try {
@@ -1209,14 +1241,25 @@ public class ServerLauncher {
                 }
             } catch (Exception ignored) {}
         }
+        if (!isWorldEmpty(rootDir)) {
+            System.err.println("[WARN] Existing world files detected, but local cluster session is uninitialized. Defaulting to base generation #1.");
+        }
         return 1;
     }
 
     public static void writeLocalGeneration(Path rootDir, int gen) {
+        if (rootDir == null) return;
         Path sessionFile = rootDir.resolve(".cluster_session");
+        Path manifestFile = rootDir.resolve("manifest.json");
         try {
             String json = String.format("{\"base_generation\":%d}", gen);
             Files.writeString(sessionFile, json, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (Exception ignored) {}
+        // Dual Persistence: Also write local manifest.json so generation memory survives even if sessionFile is removed
+        try {
+            String mJson = String.format("{\"generation\":%d,\"last_host\":\"%s\",\"timestamp\":\"%s\",\"orchestrator_version\":\"%s\",\"min_orchestrator_version\":\"%s\"}",
+                    gen, getHostName(), DateTimeFormatter.ISO_INSTANT.format(Instant.now()), APP_VERSION, APP_VERSION);
+            Files.writeString(manifestFile, mJson, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         } catch (Exception ignored) {}
     }
 
