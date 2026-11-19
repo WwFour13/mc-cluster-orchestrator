@@ -2,78 +2,84 @@
 setlocal enabledelayedexpansion
 cd /d "%~dp0.."
 
+set "DO_PAUSE=1"
+if /i "%~1"=="--no-pause" set "DO_PAUSE=0"
+if /i "%~2"=="--no-pause" set "DO_PAUSE=0"
+
 echo ================================================================================
-echo           MC CLUSTER ORCHESTRATOR - v2.1.11 FULL UNIT TEST SUITE
+echo           MC CLUSTER ORCHESTRATOR - v2.1.12 FULL UNIT TEST SUITE
 echo ================================================================================
 echo.
 
 if not exist "tests\bin" mkdir "tests\bin"
 
-echo [Compiling Test Harnesses] Compiling 12 unit and direct-function test classes...
-javac --release 21 -encoding UTF-8 -cp "minecraft-server\ServerLauncher.jar;tests" -d "tests\bin" ^
+echo [Compiling Test Harnesses] Compiling domain-separated test classes...
+javac --release 21 -encoding UTF-8 -cp "minecraft-server\ServerLauncher.jar;tests\common;tests\local;tests\backblaze;tests\playit;src" -d "tests\bin" ^
   src\ClusterToken.java ^
   src\ServerLauncher.java ^
-  tests\MockRcloneHarness.java ^
-  tests\TestCredentialIsolation.java ^
-  tests\TestRcloneFlagIntegrity.java ^
-  tests\TestJsonParsing.java ^
-  tests\TestLockTombstoneCompatibility.java ^
-  tests\TestStopSignalThrottling.java ^
-  tests\TestEmergencyModeLifecycle.java ^
-  tests\TestFailClosedLockRetention.java ^
-  tests\TestDirectWorldSafety.java ^
-  tests\TestDirectQuotaProtection.java ^
-  tests\TestDirectLockProtocol.java ^
-  tests\TestDirectWorldEmpty.java ^
-  tests\TestDirectVersionComparator.java
+  src\PaperDownloader.java ^
+  src\ClusterRegistry.java ^
+  tests\common\*.java ^
+  tests\local\*.java ^
+  tests\backblaze\*.java ^
+  tests\playit\*.java
 
 if %ERRORLEVEL% neq 0 (
     echo [ERROR] Compilation failed.
-    pause
+    if "%DO_PAUSE%"=="1" pause
     exit /b %ERRORLEVEL%
 )
-echo [OK] All test suites compiled cleanly.
+echo [OK] All domain test suites compiled cleanly.
 echo.
 
 set PASSED_COUNT=0
 set FAILED_COUNT=0
 
-echo [PHASE 1] Structural and Architectural Invariant Tests (Synthetic Harnesses)
+echo [DOMAIN 1] Local Offline, Packaging and Lifecycle Tests (tests/local/)
+echo --------------------------------------------------------------------------------
+call :run_test TestSecretLeakSanitizer "Personal Secret Leak and Git Tracking Sanitizer"
+call :run_test TestStarterPackLifecycle "Starter Pack Offline Export/Import Lifecycle"
+call :run_test TestAdminOnboarding "First-Time Admin Onboarding and Server Adoption"
+call :run_test TestJsonParsing "JSON Parsing and Boolean Extraction"
+call :run_test TestDirectVersionComparator "Direct SemVer Hierarchy Invariants"
+call :run_test TestDirectWorldEmpty "Direct World Population and Chunk Boundary Sniffer"
+call :run_test TestDirectWorldSafety "Dual Persistence and level.dat Conflict Guard"
+
+echo.
+echo [DOMAIN 2] Backblaze B2, Concurrency and Quota Protection Tests (tests/backblaze/)
 echo --------------------------------------------------------------------------------
 call :run_test TestCredentialIsolation "Credential Isolation and B2 Remote Target"
 call :run_test TestRcloneFlagIntegrity "Rclone Command Construction and Flag Integrity"
-call :run_test TestJsonParsing "JSON Parsing and Boolean Extraction"
 call :run_test TestLockTombstoneCompatibility "Lock Tombstone Dual-Architecture Compatibility"
 call :run_test TestStopSignalThrottling "Sixty-Second Stop-Signal Throttling"
 call :run_test TestEmergencyModeLifecycle "Emergency Local Mode State and Expiration"
 call :run_test TestFailClosedLockRetention "Fail-Closed Lock Retention and Teardown"
+call :run_test TestDirectQuotaProtection "Direct Quota Protection and Egress Guard"
+call :run_test TestDirectLockProtocol "Direct Lock Protocol and Distributed Quiescence"
 
 echo.
-echo [PHASE 2] Production Direct-Function Tests (Mock Rclone Interceptor)
+echo [DOMAIN 3] Playit Anycast Tunnel Resolution Tests (tests/playit/)
 echo --------------------------------------------------------------------------------
-call :run_test TestDirectWorldSafety "Direct ServerLauncher.pushToB2 Conflict and World Safety"
-call :run_test TestDirectQuotaProtection "Direct ServerLauncher.checkRemoteStopSignal Quota Protection"
-call :run_test TestDirectLockProtocol "Direct ServerLauncher Lock Protocol and Distributed Quiescence"
-call :run_test TestDirectWorldEmpty "Direct ServerLauncher.isWorldEmpty Boundary Detection"
-call :run_test TestDirectVersionComparator "Direct ServerLauncher.compareVersions SemVer Invariants"
+call :run_test TestPlayitTunnelParsing "Playit Anycast Tunnel SRV and Binary Resolution"
 
+echo.
 echo ================================================================================
-echo                          v2.1.11 TEST SCOREBOARD
+echo                          v2.1.12 TEST SCOREBOARD
 echo ================================================================================
-echo Total Test Suites Executed : 12
+echo Total Test Suites Executed : 16
 echo Passed                     : !PASSED_COUNT!
 echo Failed                     : !FAILED_COUNT!
 echo.
 
 if !FAILED_COUNT! equ 0 (
-    echo [STATUS] ALL v2.1.11 UNIT TESTS PASSED WITH 100%% SUCCESS.
+    echo [STATUS] ALL 16 DOMAIN UNIT TESTS PASSED WITH 100%% SUCCESS.
     echo ================================================================================
-    if "%~1" neq "--no-pause" pause
+    if "%DO_PAUSE%"=="1" pause
     exit /b 0
 ) else (
     echo [STATUS] ONE OR MORE UNIT TESTS FAILED.
     echo ================================================================================
-    if "%~1" neq "--no-pause" pause
+    if "%DO_PAUSE%"=="1" pause
     exit /b 1
 )
 

@@ -63,8 +63,9 @@ public class TestDirectWorldSafety {
             List<String> calls2 = MockRcloneHarness.getRecordedInvocations();
             String copyCall = calls2.stream().filter(c -> c.startsWith("copy")).findFirst().orElse("");
             if (copyCall.contains("--update") && copyCall.contains("--fast-list") && copyCall.contains("--use-server-modtime")
-                    && copyCall.contains("--s3-no-head") && copyCall.contains("--s3-no-head-object")) {
-                System.out.println("  ✓ PASS: pushToB2() passed exact required zero-Class-B flags array to ProcessBuilder");
+                    && copyCall.contains("--s3-no-head") && copyCall.contains("--s3-no-head-object")
+                    && copyCall.contains("--exclude *.zip") && copyCall.contains("--exclude *.tar*") && copyCall.contains("--exclude cohost-files*")) {
+                System.out.println("  ✓ PASS: pushToB2() passed exact required zero-Class-B flags and hardcoded archive exclusion flags array");
             } else {
                 System.err.println("  ✗ FAIL: Missing required flags in actual copy invocation: " + copyCall);
                 failures++;

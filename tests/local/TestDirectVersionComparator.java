@@ -7,37 +7,37 @@ public class TestDirectVersionComparator {
 
         int failures = 0;
 
-        // Case 1: Standard minor/patch progression (2.1.11 > 2.1.10)
-        int res1 = ServerLauncher.compareVersions("2.1.11", "2.1.10");
+        // Case 1: Standard minor/patch progression (2.1.12 > 2.1.11)
+        int res1 = ServerLauncher.compareVersions("2.1.12", "2.1.11");
         if (res1 > 0) {
-            System.out.println("  ✓ PASS: '2.1.11' is correctly evaluated as newer than '2.1.10'");
+            System.out.println("  ✓ PASS: '2.1.12' is correctly evaluated as newer than '2.1.11'");
         } else {
-            System.err.printf("  ✗ FAIL: '2.1.11' vs '2.1.10' returned: %d%n", res1);
+            System.err.printf("  ✗ FAIL: '2.1.12' vs '2.1.11' returned: %d%n", res1);
             failures++;
         }
 
-        // Case 2: Multi-digit vs single-digit patch (2.1.11 > 2.1.2) - prevents alphabetical sort bug
-        int res2 = ServerLauncher.compareVersions("2.1.11", "2.1.2");
+        // Case 2: Multi-digit vs single-digit patch (2.1.12 > 2.1.2) - prevents alphabetical sort bug
+        int res2 = ServerLauncher.compareVersions("2.1.12", "2.1.2");
         if (res2 > 0) {
-            System.out.println("  ✓ PASS: '2.1.11' evaluated as newer than '2.1.2' (Numeric parsing enforced)");
+            System.out.println("  ✓ PASS: '2.1.12' evaluated as newer than '2.1.2' (Numeric parsing enforced)");
         } else {
-            System.err.printf("  ✗ FAIL: Numerical comparison failed: '2.1.11' vs '2.1.2' returned: %d%n", res2);
+            System.err.printf("  ✗ FAIL: Numerical comparison failed: '2.1.12' vs '2.1.2' returned: %d%n", res2);
             failures++;
         }
 
         // Case 3: Version equality
-        int res3 = ServerLauncher.compareVersions("2.1.11", "2.1.11");
+        int res3 = ServerLauncher.compareVersions("2.1.12", "2.1.12");
         if (res3 == 0) {
-            System.out.println("  ✓ PASS: '2.1.11' equals '2.1.11'");
+            System.out.println("  ✓ PASS: '2.1.12' equals '2.1.12'");
         } else {
             System.err.printf("  ✗ FAIL: Identical versions comparison returned: %d%n", res3);
             failures++;
         }
 
-        // Case 4: 'v' prefix tolerance ('v2.1.11' vs '2.1.11')
-        int res4 = ServerLauncher.compareVersions("v2.1.11", "2.1.11");
+        // Case 4: 'v' prefix tolerance ('v2.1.12' vs '2.1.12')
+        int res4 = ServerLauncher.compareVersions("v2.1.12", "2.1.12");
         if (res4 == 0) {
-            System.out.println("  ✓ PASS: 'v2.1.11' correctly normalized to match '2.1.11'");
+            System.out.println("  ✓ PASS: 'v2.1.12' correctly normalized to match '2.1.12'");
         } else {
             System.err.printf("  ✗ FAIL: 'v' prefix mismatch returned: %d%n", res4);
             failures++;
@@ -52,18 +52,18 @@ public class TestDirectVersionComparator {
             failures++;
         }
 
-        // Case 6: Major version bump ('3.0.0' > '2.1.11')
-        int res6 = ServerLauncher.compareVersions("3.0.0", "2.1.11");
+        // Case 6: Major version bump ('3.0.0' > '2.1.12')
+        int res6 = ServerLauncher.compareVersions("3.0.0", "2.1.12");
         if (res6 > 0) {
-            System.out.println("  ✓ PASS: Major bump '3.0.0' is newer than '2.1.11'");
+            System.out.println("  ✓ PASS: Major bump '3.0.0' is newer than '2.1.12'");
         } else {
             System.err.printf("  ✗ FAIL: Major bump comparison returned: %d%n", res6);
             failures++;
         }
 
         // Case 7: Null / Empty safety
-        int res7 = ServerLauncher.compareVersions("", "2.1.11");
-        int res8 = ServerLauncher.compareVersions(null, "2.1.11");
+        int res7 = ServerLauncher.compareVersions("", "2.1.12");
+        int res8 = ServerLauncher.compareVersions(null, "2.1.12");
         if (res7 < 0 && res8 < 0) {
             System.out.println("  ✓ PASS: Null and empty strings fail gracefully as older than valid version");
         } else {

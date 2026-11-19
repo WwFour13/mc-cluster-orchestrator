@@ -20,7 +20,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.11";
+    public static final String APP_VERSION = "2.1.12";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -140,6 +140,8 @@ public class ServerLauncher {
                 default -> false;
             };
         }
+
+        ensureFilterIntegrity(activeRoot);
 
         if (!forceCli && !isSubcommand && !GraphicsEnvironment.isHeadless()) {
             ClusterGUI.launch(activeRoot);
@@ -859,6 +861,7 @@ public class ServerLauncher {
         }
 
         System.out.printf("[B2 Sync] Pulling latest state from Backblaze B2 (Cloud Gen #%d vs Local Gen #%d)...%n", cloudGen, localGen);
+        ensureFilterIntegrity(rootDir);
         Path filterPath = rootDir.resolve("rclone-filter.txt");
         List<String> cmd = new ArrayList<>();
         cmd.add(rclone);
@@ -869,6 +872,14 @@ public class ServerLauncher {
             cmd.add("--filter-from");
             cmd.add(filterPath.toString());
         }
+        cmd.add("--exclude");
+        cmd.add("*.zip");
+        cmd.add("--exclude");
+        cmd.add("*.tar*");
+        cmd.add("--exclude");
+        cmd.add("cohost-files*");
+        cmd.add("--exclude");
+        cmd.add("/backups/**");
         cmd.add("--fast-list");
         cmd.add("--use-server-modtime");
 
@@ -911,6 +922,7 @@ public class ServerLauncher {
             return false;
         }
 
+        ensureFilterIntegrity(rootDir);
         Path filterPath = rootDir.resolve("rclone-filter.txt");
         List<String> cmd = new ArrayList<>();
         cmd.add(rclone);
@@ -924,6 +936,22 @@ public class ServerLauncher {
             cmd.add("world");
             cmd.add(b2Target + "/world");
         }
+        cmd.add("--exclude");
+        cmd.add("*.zip");
+        cmd.add("--exclude");
+        cmd.add("*.tar*");
+        cmd.add("--exclude");
+        cmd.add("*.7z");
+        cmd.add("--exclude");
+        cmd.add("*.rar");
+        cmd.add("--exclude");
+        cmd.add("cohost-files*");
+        cmd.add("--exclude");
+        cmd.add("/backups/**");
+        cmd.add("--exclude");
+        cmd.add("*.update");
+        cmd.add("--exclude");
+        cmd.add("*.tmp");
         cmd.add("--fast-list");
         cmd.add("--use-server-modtime");
         cmd.add("--update");
@@ -1260,6 +1288,80 @@ public class ServerLauncher {
             String mJson = String.format("{\"generation\":%d,\"last_host\":\"%s\",\"timestamp\":\"%s\",\"orchestrator_version\":\"%s\",\"min_orchestrator_version\":\"%s\"}",
                     gen, getHostName(), DateTimeFormatter.ISO_INSTANT.format(Instant.now()), APP_VERSION, APP_VERSION);
             Files.writeString(manifestFile, mJson, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (Exception ignored) {}
+    }
+
+    public static void ensureFilterIntegrity(Path rootDir) {
+        if (rootDir == null) return;
+        Path filterPath = rootDir.resolve("rclone-filter.txt");
+        try {
+            if (Files.exists(filterPath)) {
+                String content = Files.readString(filterPath, StandardCharsets.UTF_8);
+                if (!content.contains("*.zip")) {
+                    if (content.contains("+ /**")) {
+                        content = content.replace("+ /**", "- *.zip\n- *.tar*\n- *.7z\n- *.rar\n- cohost-files*\n- /backups/**\n+ /**");
+                    } else {
+                        content += "\n- *.zip\n- *.tar*\n- *.7z\n- *.rar\n- cohost-files*\n- /backups/**\n";
+                    }
+                    Files.writeString(filterPath, content, StandardCharsets.UTF_8);
+                    System.out.println("[Filter Guard] Automatically hardened local rclone-filter.txt with archive exclusions.");
+                }
+            } else {
+                String defaultFilter = """
+# Exclude local and cache directories
+- /backups/**
+- /bin/**
+- /cache/**
+- /logs/**
+- /.paper/**
+- /libraries/**
+- /versions/**
+
+# Allow orchestrator self-updates from cloud
++ /START_SERVER.bat
++ /START_SERVER.command
++ /rclone-filter.txt
+
+# Exclude local credentials, locks, metadata, and scripts
+- config.json
+- [template]config.json
+- *.template.json
+- .server_active.lock
+- .cluster_session
+- cluster.lock
+- session.lock
+- **/session.lock
+- remote_stop.signal
+- ServerLauncher.jar.update
+- *.update
+- *.bat
+- *.sh
+- *.command
+- *.ps1
+- *.jar
+- *.zip
+- *.tar*
+- *.7z
+- *.rar
+- cohost-files*
+- *.class
+- *.exe
+- *.lnk
+- /tools/**
+- /windows/**
+- /mac-linux/**
+- rclone-filter.txt
+
+# Exclude legacy Java PlayIt plugin artifacts
+- /plugins/*playit*
+- /plugins/playit-gg/**
+
+# Include everything else (world, plugins, configs, manifest.json)
++ /**
+""";
+                Files.writeString(filterPath, defaultFilter.trim() + "\n", StandardCharsets.UTF_8);
+                System.out.println("[Filter Guard] Initialized master rclone-filter.txt template.");
+            }
         } catch (Exception ignored) {}
     }
 
@@ -2153,6 +2255,7 @@ public class ServerLauncher {
             return 0.0;
         }
 
+        ensureFilterIntegrity(rootDir);
         Path filterPath = rootDir.resolve("rclone-filter.txt");
         List<String> cmd = new ArrayList<>();
         cmd.add(rclone);
@@ -2163,6 +2266,14 @@ public class ServerLauncher {
             cmd.add("--filter-from");
             cmd.add(filterPath.toString());
         }
+        cmd.add("--exclude");
+        cmd.add("*.zip");
+        cmd.add("--exclude");
+        cmd.add("*.tar*");
+        cmd.add("--exclude");
+        cmd.add("cohost-files*");
+        cmd.add("--exclude");
+        cmd.add("/backups/**");
         cmd.add("--fast-list");
         cmd.add("--use-server-modtime");
         cmd.add("--dry-run");

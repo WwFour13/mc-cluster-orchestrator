@@ -35,6 +35,12 @@ public class TestRcloneFlagIntegrity {
                 System.err.println("  ✗ FAIL: pullFromB2 missing fast-list or use-server-modtime optimizations.");
                 failures++;
             }
+            if (pullMethod.contains("\"--exclude\"") && pullMethod.contains("\"*.zip\"") && pullMethod.contains("\"*.tar*\"")) {
+                System.out.println("  ✓ PASS: pullFromB2 strictly enforces hardcoded '--exclude *.zip' CLI guard");
+            } else {
+                System.err.println("  ✗ FAIL: pullFromB2 missing hardcoded '--exclude *.zip' CLI guard!");
+                failures++;
+            }
         } else {
             System.err.println("  ✗ FAIL: Could not locate pullFromB2 method in ServerLauncher.java");
             failures++;
@@ -69,6 +75,12 @@ public class TestRcloneFlagIntegrity {
                 System.err.println("  ✗ FAIL: estimateEgressMb missing '--dry-run'!");
                 failures++;
             }
+            if (estimateMethod.contains("\"--exclude\"") && estimateMethod.contains("\"*.zip\"") && estimateMethod.contains("\"*.tar*\"")) {
+                System.out.println("  ✓ PASS: estimateEgressMb strictly enforces hardcoded '--exclude *.zip' CLI guard");
+            } else {
+                System.err.println("  ✗ FAIL: estimateEgressMb missing hardcoded '--exclude *.zip' CLI guard!");
+                failures++;
+            }
         } else {
             System.err.println("  ✗ FAIL: Could not locate estimateEgressMb method.");
             failures++;
@@ -95,6 +107,12 @@ public class TestRcloneFlagIntegrity {
                 System.err.println("  ✗ FAIL: pushToB2 missing fast-list!");
                 failures++;
             }
+            if (pushMethod.contains("\"--exclude\"") && pushMethod.contains("\"*.zip\"") && pushMethod.contains("\"*.tar*\"")) {
+                System.out.println("  ✓ PASS: pushToB2 strictly enforces hardcoded '--exclude *.zip' CLI guard");
+            } else {
+                System.err.println("  ✗ FAIL: pushToB2 missing hardcoded '--exclude *.zip' CLI guard!");
+                failures++;
+            }
         } else {
             System.err.println("  ✗ FAIL: Could not locate pushToB2 method.");
             failures++;
@@ -102,7 +120,7 @@ public class TestRcloneFlagIntegrity {
 
         System.out.println("--------------------------------------------------------------------------------");
         if (failures == 0) {
-            System.out.println("[RESULT] ALL 7 FLAG INTEGRITY ASSERTIONS PASSED.\n");
+            System.out.println("[RESULT] ALL 10 FLAG INTEGRITY ASSERTIONS PASSED.\n");
             System.exit(0);
         } else {
             System.err.printf("[RESULT] %d ASSERTIONS FAILED.\n\n", failures);
