@@ -37,6 +37,7 @@ scratch/*
 tests/bin/
 tests/__pycache__/
 tests/.tmp*
+tests/examples/
 # Playit tunnel credentials
 playit.toml
 *.toml

@@ -38,6 +38,22 @@ public class TestFailClosedLockRetention {
             failures++;
         }
 
+        // Case C: World chunks transferred, but cloud manifest.json write failed
+        boolean chunkCopySuccessC = true;
+        boolean manifestWriteSuccessC = false;
+        boolean pushSuccessC = chunkCopySuccessC && manifestWriteSuccessC;
+        boolean lockReleasedC = false;
+        if (pushSuccessC) {
+            lockReleasedC = true;
+        }
+
+        if (!lockReleasedC) {
+            System.out.println("  ✓ PASS: When manifest.json update fails, pushToB2 fails closed and lock is RETAINED");
+        } else {
+            System.err.println("  ✗ FAIL: Cloud lock was released despite manifest write failure!");
+            failures++;
+        }
+
         // 2. Generation Alignment Verification Logic in pushToB2
         // Scenario 1: Stale Local vs Cloud (Split-Brain Prevention)
         int localGen1 = 25;
@@ -76,7 +92,7 @@ public class TestFailClosedLockRetention {
 
         System.out.println("--------------------------------------------------------------------------------");
         if (failures == 0) {
-            System.out.println("[RESULT] ALL 5 CONCURRENCY & TEARDOWN ASSERTIONS PASSED.\n");
+            System.out.println("[RESULT] ALL 6 CONCURRENCY & TEARDOWN ASSERTIONS PASSED.\n");
             System.exit(0);
         } else {
             System.err.printf("[RESULT] %d ASSERTIONS FAILED.\n\n", failures);

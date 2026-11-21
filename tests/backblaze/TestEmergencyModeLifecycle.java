@@ -96,6 +96,17 @@ public class TestEmergencyModeLifecycle {
                 failures++;
             }
 
+            // Assertion 6: Emergency mode refuses normal cluster lock heartbeats
+            ServerLauncher.activateEmergencyMode(tempDir, "TesterHost", 26, "QUOTA_EXCEEDED");
+            ServerLauncher.CommandResult heartbeat = ServerLauncher.writeCloudHeartbeat(
+                    tempDir, "unused-rclone", "unused:bucket/server", "TesterHost");
+            if (heartbeat != null && heartbeat.toString().contains("Emergency mode heartbeat write rejected")) {
+                System.out.println("  ✓ PASS: Emergency mode refuses normal cluster lock heartbeat writes");
+            } else {
+                System.err.println("  ✗ FAIL: Emergency mode wrote or allowed a normal cluster lock heartbeat");
+                failures++;
+            }
+
         } finally {
             if (Files.exists(tempDir)) {
                 Files.walk(tempDir)

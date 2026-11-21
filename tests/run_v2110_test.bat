@@ -7,7 +7,7 @@ if /i "%~1"=="--no-pause" set "DO_PAUSE=0"
 if /i "%~2"=="--no-pause" set "DO_PAUSE=0"
 
 echo ================================================================================
-echo           MC CLUSTER ORCHESTRATOR - v2.1.12 FULL UNIT TEST SUITE
+echo           MC CLUSTER ORCHESTRATOR - v2.1.13 FULL UNIT TEST SUITE
 echo ================================================================================
 echo.
 
@@ -15,10 +15,7 @@ if not exist "tests\bin" mkdir "tests\bin"
 
 echo [Compiling Test Harnesses] Compiling domain-separated test classes...
 javac --release 21 -encoding UTF-8 -cp "minecraft-server\ServerLauncher.jar;tests\common;tests\local;tests\backblaze;tests\playit;src" -d "tests\bin" ^
-  src\ClusterToken.java ^
-  src\ServerLauncher.java ^
-  src\PaperDownloader.java ^
-  src\ClusterRegistry.java ^
+  src\*.java ^
   tests\common\*.java ^
   tests\local\*.java ^
   tests\backblaze\*.java ^
@@ -56,6 +53,7 @@ call :run_test TestEmergencyModeLifecycle "Emergency Local Mode State and Expira
 call :run_test TestFailClosedLockRetention "Fail-Closed Lock Retention and Teardown"
 call :run_test TestDirectQuotaProtection "Direct Quota Protection and Egress Guard"
 call :run_test TestDirectLockProtocol "Direct Lock Protocol and Distributed Quiescence"
+call :run_test TestStaleHostLifecycle "Stale-Host Fail-Stop and Lease Lifecycle Invariants"
 
 echo.
 echo [DOMAIN 3] Playit Anycast Tunnel Resolution Tests (tests/playit/)
@@ -64,15 +62,15 @@ call :run_test TestPlayitTunnelParsing "Playit Anycast Tunnel SRV and Binary Res
 
 echo.
 echo ================================================================================
-echo                          v2.1.12 TEST SCOREBOARD
+echo                          v2.1.13 TEST SCOREBOARD
 echo ================================================================================
-echo Total Test Suites Executed : 16
+echo Total Test Suites Executed : 17
 echo Passed                     : !PASSED_COUNT!
 echo Failed                     : !FAILED_COUNT!
 echo.
 
 if !FAILED_COUNT! equ 0 (
-    echo [STATUS] ALL 16 DOMAIN UNIT TESTS PASSED WITH 100%% SUCCESS.
+    echo [STATUS] ALL 17 DOMAIN UNIT TESTS PASSED WITH 100%% SUCCESS.
     echo ================================================================================
     if "%DO_PAUSE%"=="1" pause
     exit /b 0

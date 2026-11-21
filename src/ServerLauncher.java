@@ -11,7 +11,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.ListIterator;
 import java.util.UUID;
+import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -20,7 +24,7 @@ import java.util.zip.*;
 
 public class ServerLauncher {
 
-    public static final String APP_VERSION = "2.1.12";
+    public static final String APP_VERSION = "2.1.13";
 
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -37,6 +41,250 @@ public class ServerLauncher {
     private static final AtomicBoolean isPushActive = new AtomicBoolean(false);
     private static volatile CompletableFuture<?> activeIncrementalPush = null;
     private static volatile String activeLockId = null;
+    private static final Set<Process> activeRcloneProcesses =
+            ConcurrentHashMap.newKeySet();
+
+    public static String getActiveLockId() {
+        return activeLockId;
+    }
+
+    // -------------------------------------------------------------------------
+    // Stale-Host Fail-Stop: Hosting Session Lease Tracking
+    // -------------------------------------------------------------------------
+    public enum SessionState {
+        IDLE,
+        ACTIVE,
+        LOST,
+        STOPPING,
+        STOPPED
+    }
+
+    public static class HostingSession {
+        private final String lockId;
+        private final String host;
+        private final int staleTimeoutMinutes;
+        private final long leaseDurationNanos;
+        private volatile SessionState state;
+        private volatile long leaseDeadlineNanos;
+        private final Object stateLock = new Object();
+
+        public HostingSession(String lockId, String host, int staleTimeoutMinutes, int heartbeatSeconds) {
+            this.lockId = lockId;
+            this.host = host;
+            this.staleTimeoutMinutes = staleTimeoutMinutes;
+
+            long staleSec = Math.max(1, (long) staleTimeoutMinutes * 60L);
+
+            // The local deadline must be strictly INSIDE the remote reclaim threshold.
+            // Never lengthen the remote timeout to compensate for a short stale setting.
+            long effectiveLeaseSeconds = Math.max(10, (long) (staleSec * 0.75));
+            effectiveLeaseSeconds = Math.min(effectiveLeaseSeconds, staleSec - 1);
+            this.leaseDurationNanos = effectiveLeaseSeconds * 1_000_000_000L;
+
+            long now = System.nanoTime();
+            this.leaseDeadlineNanos = now + this.leaseDurationNanos;
+            this.state = SessionState.ACTIVE;
+        }
+
+        public String getLockId() { return lockId; }
+        public String getHost() { return host; }
+        public SessionState getState() { return state; }
+        public int getStaleTimeoutMinutes() { return staleTimeoutMinutes; }
+
+        public boolean isLeaseValid() {
+            synchronized (stateLock) {
+                if (state != SessionState.ACTIVE) return false;
+                if (System.nanoTime() >= leaseDeadlineNanos) {
+                    transitionToLost("Lease deadline elapsed without verified cloud heartbeat renewal.");
+                    return false;
+                }
+                return true;
+            }
+        }
+
+        public boolean updateVerifiedHeartbeat() {
+            synchronized (stateLock) {
+                if (state != SessionState.ACTIVE) {
+                    System.err.println("[SAFETY GUARD] Rejecting heartbeat renewal: Session is permanently " + state);
+                    return false;
+                }
+                long now = System.nanoTime();
+                if (now >= leaseDeadlineNanos) {
+                    transitionToLost("Lease expired before heartbeat verification completed.");
+                    return false;
+                }
+                this.leaseDeadlineNanos = now + leaseDurationNanos;
+                return true;
+            }
+        }
+
+        public void transitionToLost(String reason) {
+            synchronized (stateLock) {
+                if (state == SessionState.LOST || state == SessionState.STOPPED) return;
+                this.state = SessionState.LOST;
+                System.err.println("\n========================================================");
+                System.err.println("[STALE-HOST FAIL-STOP] HOSTING SESSION PERMANENTLY LOST!");
+                System.err.println("  Reason: " + reason);
+                System.err.println("  Immediate fail-stop triggered: Minecraft server and Playit tunnel will be halted.");
+                System.err.println("  All future heartbeats, cloud pushes, and lock releases are permanently revoked.");
+                System.err.println("  Local world will be preserved non-authoritatively for recovery.");
+                System.err.println("========================================================\n");
+            }
+        }
+
+        public void transitionStopping() {
+            synchronized (stateLock) {
+                if (state == SessionState.ACTIVE) {
+                    state = SessionState.STOPPING;
+                }
+            }
+        }
+
+        public void transitionStopped() {
+            synchronized (stateLock) {
+                state = SessionState.STOPPED;
+            }
+        }
+    }
+
+    private static volatile HostingSession currentSession = null;
+    private static final Object heartbeatExecutionLock = new Object();
+
+    public static HostingSession getCurrentSession() {
+        return currentSession;
+    }
+
+    public static void setCurrentSession(HostingSession session) {
+        currentSession = session;
+    }
+
+    public static void clearCurrentSession() {
+        currentSession = null;
+    }
+
+    // -------------------------------------------------------------------------
+    // Stale-Host Recovery & Divergence Management
+    // -------------------------------------------------------------------------
+    public static final String DIVERGENT_MARKER_FILE = ".lost_host_recovery.json";
+
+    public static boolean hasDivergentMarker(Path rootDir) {
+        if (rootDir == null) return false;
+        return Files.exists(rootDir.resolve(DIVERGENT_MARKER_FILE));
+    }
+
+    public static void markLocalWorldDivergent(Path rootDir, String reason, String lockId) {
+        if (rootDir == null) return;
+        try {
+            Path marker = rootDir.resolve(DIVERGENT_MARKER_FILE);
+            String json = String.format("{\"lost_at\":\"%s\",\"reason\":\"%s\",\"lock_id\":\"%s\",\"base_generation\":%d}",
+                    DateTimeFormatter.ISO_INSTANT.format(Instant.now()),
+                    reason != null ? reason.replace("\"", "\\\"") : "Lease expired or superseded",
+                    lockId != null ? lockId : "",
+                    readLocalGeneration(rootDir));
+            Files.writeString(marker, json, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            System.err.println("[RECOVERY] Marked local world as non-authoritative divergent copy in " + DIVERGENT_MARKER_FILE);
+        } catch (Exception e) {
+            System.err.println("[WARN] Failed to write divergent marker: " + e.getMessage());
+        }
+    }
+
+    public static void clearDivergentMarker(Path rootDir) {
+        if (rootDir == null) return;
+        try {
+            Files.deleteIfExists(rootDir.resolve(DIVERGENT_MARKER_FILE));
+        } catch (Exception ignored) {}
+    }
+
+    public static Path preserveLocalWorldAsRecovery(Path rootDir) {
+        if (rootDir == null) return null;
+        Path worldDir = rootDir.resolve("world");
+        if (!Files.exists(worldDir) || isWorldEmpty(rootDir)) return null;
+
+        String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneOffset.UTC).format(Instant.now());
+        Path backupsDir = rootDir.resolve("backups");
+        Path recoveryDir = backupsDir.resolve("recovery-world-" + timestamp);
+        try {
+            Files.createDirectories(backupsDir);
+            copyDirectoryRecursively(worldDir, recoveryDir);
+            System.out.println("[RECOVERY] Preserved local divergent world copy to: " + recoveryDir.toAbsolutePath());
+            return recoveryDir;
+        } catch (Exception e) {
+            System.err.println("[WARN] Failed to preserve local recovery world copy: " + e.getMessage());
+            return null;
+        }
+    }
+
+    public static void copyDirectoryRecursively(Path source, Path target) throws IOException {
+        Files.walk(source).forEach(src -> {
+            try {
+                Path dest = target.resolve(source.relativize(src));
+                if (Files.isDirectory(src)) {
+                    Files.createDirectories(dest);
+                } else {
+                    Files.createDirectories(dest.getParent());
+                    Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+                }
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+    }
+
+    public static void failStopActiveHosting(Path rootDir, String reason) {
+        HostingSession session = currentSession;
+        String lockId = (session != null) ? session.getLockId() : activeLockId;
+        if (session != null) {
+            session.transitionToLost(reason);
+        }
+        markLocalWorldDivergent(rootDir, reason, lockId);
+
+        // Terminate external rclone processes as well as canceling the Java futures.
+        // A cancelled future does not stop an already-running child process.
+        for (Process rcloneProcess : activeRcloneProcesses) {
+            if (rcloneProcess.isAlive()) {
+                try {
+                    rcloneProcess.destroyForcibly();
+                } catch (Exception ignored) {}
+            }
+        }
+
+        // Cancel any in-flight cloud autosave push immediately
+        if (activeIncrementalPush != null && !activeIncrementalPush.isDone()) {
+            activeIncrementalPush.cancel(true);
+        }
+
+        // Promptly stop Playit sidecar to disconnect players immediately
+        if (activePlayitProcess != null && activePlayitProcess.isAlive()) {
+            try {
+                System.err.println("[FAIL-STOP] Terminating Playit sidecar tunnel agent to cut inbound player traffic...");
+                activePlayitProcess.destroyForcibly();
+            } catch (Exception ignored) {}
+        }
+
+        // Stop Minecraft server cleanly if possible, otherwise forcibly
+        if (activeMcStdin != null) {
+            try {
+                synchronized (activeMcStdin) {
+                    activeMcStdin.write("kick @a [Cluster] Server lease lost. Shutting down safely to prevent world corruption.\n");
+                    activeMcStdin.write("stop\n");
+                    activeMcStdin.flush();
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // Schedule forceful destruction if MC server fails to exit within 15 seconds
+        if (activeMcProcess != null && activeMcProcess.isAlive()) {
+            CompletableFuture.runAsync(() -> {
+                try {
+                    boolean finished = activeMcProcess.waitFor(15, TimeUnit.SECONDS);
+                    if (!finished && activeMcProcess.isAlive()) {
+                        System.err.println("[FAIL-STOP] Minecraft process did not exit in 15s; forcibly terminating...");
+                        activeMcProcess.destroyForcibly();
+                    }
+                } catch (Exception ignored) {}
+            });
+        }
+    }
 
     public static record CommandResult(int exitCode, String stdout, String stderr) {}
 
@@ -217,7 +465,10 @@ public class ServerLauncher {
                             System.err.println("[ERROR] Backblaze B2 is not configured in config.json.");
                             return;
                         }
-                        publishAdminUpdate(rootDir, rclone, b2Target);
+                        boolean pubOk = publishAdminUpdate(rootDir, rclone, b2Target);
+                        if (!pubOk) {
+                            System.exit(1);
+                        }
                         return;
 
                     case "push-launcher":
@@ -240,7 +491,7 @@ public class ServerLauncher {
                         System.out.println("[UNLOCK] Releasing local and cloud cluster locks...");
                         Files.deleteIfExists(lockPath);
                         if (hasB2) {
-                            releaseCloudLock(rootDir, rclone, b2Target);
+                            forceReleaseCloudLock(rootDir, rclone, b2Target);
                             cancelRemoteStop(rootDir, rclone, b2Target);
                         }
                         System.out.println("[UNLOCK] Emergency cluster unlock complete.");
@@ -406,6 +657,16 @@ public class ServerLauncher {
                 return;
             }
 
+            // Stale-Host Recovery Gate: If previous session was lost and marked divergent, require recovery pull
+            if (hasDivergentMarker(rootDir)) {
+                System.err.println("\n========================================================");
+                System.err.println("[STALE-HOST RECOVERY REQUIRED]");
+                System.err.println("  The previous hosting session lost cloud ownership and world is marked divergent.");
+                System.err.println("  A fresh cloud pull is required before hosting can resume.");
+                System.err.println("  Your unpushed local world copy will be archived to backups/ before pulling.");
+                System.err.println("========================================================\n");
+            }
+
             // 2. Lock State Verification & Acquisition
             System.out.println("[2/6] Evaluating cluster lock state...");
 
@@ -426,11 +687,8 @@ public class ServerLauncher {
                         return;
                     }
                 }
-                if (!isEmergencyModeActive(rootDir) && !acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
+                if (!isEmergencyModeActive(rootDir) && !acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin, heartbeatSec)) {
                     return;
-                }
-                if (isEmergencyModeActive(rootDir)) {
-                    writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
                 }
                 // Clear any leftover stop signal from previous sessions
                 cancelRemoteStop(rootDir, rclone, b2Target);
@@ -481,12 +739,34 @@ public class ServerLauncher {
 
             // 4. Pre-Boot State Convergence
             if (hasB2) {
-                if (isEmergencyModeActive(rootDir)) {
+                if (hasDivergentMarker(rootDir)) {
+                    System.out.println("[4/6] Stale-host recovery active: Enforcing fresh cloud synchronization over divergent local state...");
+                    syncAdminDistribution(rootDir, rclone, b2Target);
+                    boolean pullOk = pullFromB2(rootDir, rclone, b2Target, staleMin, true, cCheck != null ? cCheck.generation() : -1, -1.0);
+                    if (!pullOk) {
+                        System.err.println("\n========================================================");
+                        System.err.println("[FATAL] Recovery cloud pull failed. Cannot resume hosting on divergent local world.");
+                        System.err.println("  Launch aborted. Local world retained safely in world/ and backups/.");
+                        System.err.println("========================================================\n");
+                        releaseCloudLock(rootDir, rclone, b2Target);
+                        try { Files.deleteIfExists(lockPath); } catch (Exception ignored) {}
+                        return;
+                    }
+                } else if (isEmergencyModeActive(rootDir)) {
                     System.out.println("[4/6] Emergency Mode Active: Skipping cloud pull. Booting directly from local world.");
                 } else {
                     System.out.println("[4/6] Synchronizing administrative distribution & latest world state...");
                     syncAdminDistribution(rootDir, rclone, b2Target);
-                    pullFromB2(rootDir, rclone, b2Target, staleMin, true, cCheck != null ? cCheck.generation() : -1, -1.0);
+                    boolean pullOk = pullFromB2(rootDir, rclone, b2Target, staleMin, true, cCheck != null ? cCheck.generation() : -1, -1.0);
+                    if (!pullOk) {
+                        System.err.println("\n========================================================");
+                        System.err.println("[FATAL] Inbound world synchronization failed or was blocked.");
+                        System.err.println("  Aborting launch to prevent hosting on stale or desynchronized data.");
+                        System.err.println("========================================================\n");
+                        releaseCloudLock(rootDir, rclone, b2Target);
+                        try { Files.deleteIfExists(lockPath); } catch (Exception ignored) {}
+                        return;
+                    }
                 }
             } else {
                 System.out.println("[4/6] No cloud sync provider configured. Running in local standalone mode.");
@@ -500,10 +780,10 @@ public class ServerLauncher {
                 try {
                     writeLockFile(lockPath, localHost);
                     if (hasB2) {
-                        writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
+                        renewHostingLease(rootDir, rclone, b2Target, localHost);
                     }
                 } catch (Exception ignored) {}
-            }, heartbeatSec, heartbeatSec, TimeUnit.SECONDS);
+            }, 0, heartbeatSec, TimeUnit.SECONDS);
 
             // In-Flight Signaling: check every 60 seconds (1 minute cadence, suppressed in emergency mode)
             if (hasB2) {
@@ -610,6 +890,13 @@ public class ServerLauncher {
     public static synchronized void cleanup(Path rootDir, Path lockPath, String rclone, String b2Target,
                                              String host, int staleMin, String bwLimit,
                                              Process mcProcess, BufferedWriter mcStdin) {
+        cleanup(rootDir, lockPath, rclone, b2Target, host, staleMin, bwLimit, mcProcess, mcStdin, mcProcess != null);
+    }
+
+    public static synchronized void cleanup(Path rootDir, Path lockPath, String rclone, String b2Target,
+                                             String host, int staleMin, String bwLimit,
+                                             Process mcProcess, BufferedWriter mcStdin,
+                                             boolean shouldPushWorld) {
         if (isShuttingDown) return;
         isShuttingDown = true;
 
@@ -654,22 +941,37 @@ public class ServerLauncher {
 
         // Push final world state to Backblaze B2 with generation progression
         if (b2Target != null && !b2Target.isEmpty()) {
-            System.out.println("[B2 Sync] Pushing final world and server state to Backblaze B2...");
-            boolean pushed = pushToB2(rootDir, rclone, b2Target, host, staleMin, bwLimit, true);
-            if (pushed) {
+            HostingSession session = currentSession;
+            boolean sessionLost = (session != null && session.getState() == SessionState.LOST) || hasDivergentMarker(rootDir);
+            if (sessionLost) {
+                System.err.println("\n========================================================");
+                System.err.println("[STALE-HOST FAIL-STOP] Session was marked LOST during execution.");
+                System.err.println("  Cloud world push and lock tombstone are SKIPPED to protect successor hosts.");
+                System.err.println("  Local world is preserved non-authoritatively for administrative recovery.");
+                System.err.println("========================================================\n");
+                preserveLocalWorldAsRecovery(rootDir);
+            } else if (shouldPushWorld) {
+                System.out.println("[B2 Sync] Pushing final world and server state to Backblaze B2...");
+                boolean pushed = pushToB2(rootDir, rclone, b2Target, host, staleMin, bwLimit, true);
+                if (pushed) {
+                    releaseCloudLock(rootDir, rclone, b2Target);
+                    cancelRemoteStop(rootDir, rclone, b2Target);
+                    clearEmergencyMode(rootDir);
+                    System.out.println("[Cluster] Cluster cleanly released. Ready for next host.");
+                } else {
+                    System.err.println("\n========================================================");
+                    System.err.println("[SAFETY GUARD] Outbound push failed or could not be verified.");
+                    System.err.println("  Cloud lock RETAINED on Backblaze B2 to protect local world progress and prevent split-brain.");
+                    System.err.println("  Your latest world progress is safely saved on your local disk.");
+                    if (isEmergencyModeActive(rootDir)) {
+                        System.out.println("  Emergency Local Mode remains active until 00:00 UTC (or next successful sync).");
+                    }
+                    System.err.println("========================================================\n");
+                }
+            } else {
+                System.out.println("[Shutdown] Server was not started. Releasing cloud lock without pushing world state...");
                 releaseCloudLock(rootDir, rclone, b2Target);
                 cancelRemoteStop(rootDir, rclone, b2Target);
-                clearEmergencyMode(rootDir);
-                System.out.println("[Cluster] Cluster cleanly released. Ready for next host.");
-            } else {
-                System.err.println("\n========================================================");
-                System.err.println("[SAFETY GUARD] Outbound push failed or could not be verified.");
-                System.err.println("  Cloud lock RETAINED on Backblaze B2 to protect local world progress and prevent split-brain.");
-                System.err.println("  Your latest world progress is safely saved on your local disk.");
-                if (isEmergencyModeActive(rootDir)) {
-                    System.out.println("  Emergency Local Mode remains active until 00:00 UTC (or next successful sync).");
-                }
-                System.err.println("========================================================\n");
             }
         }
 
@@ -776,12 +1078,22 @@ public class ServerLauncher {
             return false;
         }
 
+        // Recovery Guard: If previous session was lost and marked divergent, preserve local world before pulling
+        boolean recoveryPull = hasDivergentMarker(rootDir);
+        if (recoveryPull) {
+            System.err.println("\n========================================================");
+            System.err.println("[STALE-HOST RECOVERY] Local world was marked divergent from a lost session.");
+            System.err.println("  Preserving local world into backups/ before syncing fresh cloud world.");
+            System.err.println("========================================================\n");
+            preserveLocalWorldAsRecovery(rootDir);
+        }
+
         int cloudGen = knownCloudGen > 0 ? knownCloudGen : readCloudGeneration(rootDir, rclone, b2Target);
         int localGen = readLocalGeneration(rootDir);
 
         // Zero-Egress Generation Short-Circuit:
         // If local generation matches cloud generation and local world exists, skip downloading
-        if (localGen > 0 && cloudGen > 0 && localGen == cloudGen && !isWorldEmpty(rootDir)) {
+        if (!recoveryPull && localGen > 0 && cloudGen > 0 && localGen == cloudGen && !isWorldEmpty(rootDir)) {
             System.out.printf("[B2 Sync] Local base matches Cloud Generation #%d. Zero-egress bypass active (0 MB cloud download).%n", cloudGen);
             return true;
         }
@@ -886,6 +1198,7 @@ public class ServerLauncher {
         CommandResult res = runCommand(rootDir, cmd.toArray(new String[0]));
         if (res.exitCode == 0) {
             writeLocalGeneration(rootDir, cloudGen);
+            clearDivergentMarker(rootDir);
             System.out.printf("[B2 Sync] Inbound synchronization complete (World Generation #%d).%n", cloudGen);
             return true;
         } else {
@@ -905,6 +1218,27 @@ public class ServerLauncher {
     }
 
     public static boolean pushToB2(Path rootDir, String rclone, String b2Target, String host, int staleMin, String bwLimit, boolean isNormalTeardown) {
+        if (isEmergencyModeActive(rootDir)) {
+            System.err.println("[EMERGENCY MODE] Outbound cloud push blocked to keep emergency mode non-authoritative.");
+            return false;
+        }
+        // Stale-host fail-stop validation: session must not be LOST and must have valid lease
+        HostingSession session = currentSession;
+        if (session != null) {
+            if (session.getState() == SessionState.LOST) {
+                System.err.println("[STALE-HOST GUARD] Outbound cloud push rejected: Hosting session is permanently LOST.");
+                return false;
+            }
+            if (!session.isLeaseValid()) {
+                failStopActiveHosting(rootDir, "Lease expired prior to outbound push.");
+                return false;
+            }
+        }
+        if (hasDivergentMarker(rootDir)) {
+            System.err.println("[STALE-HOST GUARD] Outbound cloud push rejected: Local world is marked divergent from a previously lost session.");
+            return false;
+        }
+
         if (!isNormalTeardown && isCloudLocked(rootDir, rclone, b2Target, staleMin)) {
             return false;
         }
@@ -962,8 +1296,26 @@ public class ServerLauncher {
 
         CommandResult res = runCommand(rootDir, cmd.toArray(new String[0]));
         if (res.exitCode == 0) {
+            // Re-verify session state before writing manifest to prevent committing if lease was lost during upload
+            if (session != null) {
+                if (session.getState() == SessionState.LOST) {
+                    System.err.println("[STALE-HOST GUARD] World uploaded, but session became LOST during upload. Aborting manifest write.");
+                    return false;
+                }
+                if (!session.isLeaseValid()) {
+                    failStopActiveHosting(rootDir, "Lease expired during world copy upload.");
+                    return false;
+                }
+            }
             int nextGen = Math.max(cloudGen, localGen) + 1;
-            writeCloudGeneration(rootDir, rclone, b2Target, nextGen, host);
+            boolean genWritten = writeCloudGeneration(rootDir, rclone, b2Target, nextGen, host);
+            if (!genWritten) {
+                System.err.println("\n========================================================");
+                System.err.println("[SAFETY GUARD] World files uploaded, but writing cloud manifest.json failed or timed out.");
+                System.err.println("  Cloud lock will be RETAINED and local generation will NOT advance to prevent desynchronization.");
+                System.err.println("========================================================\n");
+                return false;
+            }
             writeLocalGeneration(rootDir, nextGen);
             System.out.printf("[B2 Sync] Outbound synchronization complete (Advanced to Generation #%d).%n", nextGen);
             return true;
@@ -1003,30 +1355,72 @@ public class ServerLauncher {
                 || err.contains("directory not found");
     }
 
+    // ---------------------------------------------------------------------------
+    // PROVIDER LIMITATION (Recorded as UNRESOLVED):
+    // Backblaze B2's S3-compatible API does not support conditional PutObject
+    // (If-Match / If-None-Match headers). Atomic compare-and-swap at the storage
+    // layer is therefore unavailable on this provider. The current protocol narrows
+    // the race window using: (1) UUID candidate tokens with quiescence delay and
+    // read-back verification on acquisition, and (2) lease-expiry precondition
+    // and post-write read-back on release. These provide best-effort protection
+    // but cannot guarantee exclusion against adversarial or high-latency concurrent
+    // writes. Production-safe distributed locking on B2 would require a separate
+    // coordination service (e.g., a lock server, database, or a provider that
+    // implements conditional object writes).
+    // ---------------------------------------------------------------------------
     public static boolean isCloudLocked(Path rootDir, String rclone, String b2Target, int staleMin) {
         CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
-        if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
-            boolean released = extractJsonBoolean(catRes.stdout, "released", false);
-            String activeHost = extractJsonString(catRes.stdout, "host");
-            if (released || activeHost == null || activeHost.trim().isEmpty()) {
+        if (catRes.exitCode == 0) {
+            String out = catRes.stdout != null ? catRes.stdout.trim() : "";
+            if (out.isEmpty()) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cloud lock payload is empty or blank. Failing closed: Treating cluster as locked.");
+                return true;
+            }
+            MiniJson.JsonObject obj;
+            try {
+                obj = MiniJson.parseObjectStrict(out);
+            } catch (Exception e) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cloud lock payload is malformed or unparseable JSON: " + catRes.stdout);
+                System.err.println("  Failing closed: Treating cluster as locked to prevent world corruption.");
+                return true;
+            }
+            if (!obj.has("released") || !obj.has("host") || !obj.has("timestamp")) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cloud lock payload lacks mandatory schema fields ('released', 'host', 'timestamp'): " + catRes.stdout);
+                System.err.println("  Failing closed: Treating cluster as locked to prevent world corruption.");
+                return true;
+            }
+            boolean released;
+            try {
+                released = obj.getStrictBoolean("released");
+            } catch (MiniJson.ParseException pe) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cloud lock 'released' field is not a strict JSON boolean. Acquisition aborted.");
                 return false;
             }
-            String timestampStr = extractJsonString(catRes.stdout, "timestamp");
-            if (timestampStr != null && !timestampStr.isEmpty()) {
-                try {
-                    Instant lastBeat = Instant.parse(timestampStr);
-                    long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
-                    if (elapsedMinutes < staleMin) {
-                        System.err.printf("[ABORT] Cannot sync: Server is actively hosted by '%s'!%n", activeHost);
-                        System.err.printf("Active heartbeat was pulsed %d minutes ago. Wait until they finish and exit.%n", elapsedMinutes);
-                        return true;
-                    } else {
-                        // Heartbeat expired, lock is stale and therefore eligible for reclamation
-                        return false;
-                    }
-                } catch (Exception ignored) {}
+            String activeHost = obj.getString("host");
+            if (released) {
+                return false;
             }
-            return false;
+            if (activeHost == null || activeHost.trim().isEmpty()) {
+                System.err.println("[SPLIT-BRAIN GUARD] Active cloud lock payload lacks host identification: " + catRes.stdout);
+                System.err.println("  Failing closed: Treating cluster as locked to prevent world corruption.");
+                return true;
+            }
+            String timestampStr = obj.getString("timestamp");
+            try {
+                Instant lastBeat = Instant.parse(timestampStr);
+                long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
+                if (elapsedMinutes < staleMin) {
+                    System.err.printf("[ABORT] Cannot sync: Server is actively hosted by '%s'!%n", activeHost);
+                    System.err.printf("Active heartbeat was pulsed %d minutes ago. Wait until they finish and exit.%n", elapsedMinutes);
+                    return true;
+                } else {
+                    // Heartbeat expired, lock is stale and therefore eligible for reclamation
+                    return false;
+                }
+            } catch (Exception e) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cloud lock timestamp is malformed: " + timestampStr + ". Failing closed.");
+                return true;
+            }
         }
 
         // Fail-Closed Guard: If reading the cloud lock failed due to network outage, quota exceeded,
@@ -1045,10 +1439,19 @@ public class ServerLauncher {
     public static String readLockHost(Path rootDir, String rclone, String b2Target) {
         CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
         if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
-            boolean released = extractJsonBoolean(catRes.stdout, "released", false);
-            String activeHost = extractJsonString(catRes.stdout, "host");
-            if (!released && activeHost != null && !activeHost.isEmpty()) {
-                return activeHost;
+            MiniJson.JsonObject obj = MiniJson.parseObject(catRes.stdout);
+            if (obj != null) {
+                boolean released;
+                try {
+                    released = obj.getStrictBoolean("released");
+                } catch (MiniJson.ParseException pe) {
+                    System.err.println("[SPLIT-BRAIN GUARD] Cloud lock 'released' field is malformed. Sync blocked.");
+                    return "Active Peer";
+                }
+                String activeHost = obj.getString("host");
+                if (!released && activeHost != null && !activeHost.isEmpty()) {
+                    return activeHost;
+                }
             }
         }
         return "Active Peer";
@@ -1075,24 +1478,57 @@ public class ServerLauncher {
     }
 
     public static boolean acquireCloudLock(Path rootDir, String rclone, String b2Target, String host, int staleMin) {
+        return acquireCloudLock(rootDir, rclone, b2Target, host, staleMin, 300);
+    }
+
+    public static boolean acquireCloudLock(Path rootDir, String rclone, String b2Target, String host, int staleMin, int heartbeatSeconds) {
         CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
-        if (catRes.exitCode == 0 && !catRes.stdout.isEmpty()) {
-            boolean released = extractJsonBoolean(catRes.stdout, "released", false);
-            String activeHost = extractJsonString(catRes.stdout, "host");
-            if (!released && activeHost != null && !activeHost.trim().isEmpty()) {
-                String timestampStr = extractJsonString(catRes.stdout, "timestamp");
-                if (timestampStr != null && !timestampStr.isEmpty()) {
-                    try {
-                        Instant lastBeat = Instant.parse(timestampStr);
-                        long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
-                        if (elapsedMinutes < staleMin) {
-                            System.err.printf("[ABORT] Server actively hosted by: %s%n", activeHost);
-                            System.err.printf("Active heartbeat was pulsed %d minutes ago.%n", elapsedMinutes);
-                            return false;
-                        } else {
-                            System.out.printf("[WARN] Host '%s' heartbeat expired (%d min elapsed). Reclaiming cloud lock...%n", activeHost, elapsedMinutes);
-                        }
-                    } catch (Exception ignored) {}
+        if (catRes.exitCode == 0) {
+            String out = catRes.stdout != null ? catRes.stdout.trim() : "";
+            if (out.isEmpty()) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cloud lock payload is empty or blank. Acquisition aborted to prevent concurrent hosting.");
+                return false;
+            }
+            MiniJson.JsonObject obj;
+            try {
+                obj = MiniJson.parseObjectStrict(out);
+            } catch (Exception e) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cloud lock payload is malformed or unparseable JSON: " + catRes.stdout);
+                System.err.println("Lock acquisition aborted to prevent duplicate concurrent hosting!");
+                return false;
+            }
+            if (!obj.has("released") || !obj.has("host") || !obj.has("timestamp")) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cloud lock payload lacks mandatory schema fields ('released', 'host', 'timestamp'): " + catRes.stdout);
+                System.err.println("Lock acquisition aborted to prevent duplicate concurrent hosting!");
+                return false;
+            }
+            boolean released;
+            try {
+                released = obj.getStrictBoolean("released");
+            } catch (MiniJson.ParseException pe) {
+                System.err.println("[SPLIT-BRAIN GUARD] Cloud lock 'released' field is malformed. Read-locked to avoid split-brain.");
+                return false;
+            }
+            String activeHost = obj.getString("host");
+            if (!released) {
+                if (activeHost == null || activeHost.trim().isEmpty()) {
+                    System.err.println("[SPLIT-BRAIN GUARD] Active cloud lock payload lacks host identification. Acquisition aborted.");
+                    return false;
+                }
+                String timestampStr = obj.getString("timestamp");
+                try {
+                    Instant lastBeat = Instant.parse(timestampStr);
+                    long elapsedMinutes = Duration.between(lastBeat, Instant.now()).toMinutes();
+                    if (elapsedMinutes < staleMin) {
+                        System.err.printf("[ABORT] Server actively hosted by: %s%n", activeHost);
+                        System.err.printf("Active heartbeat was pulsed %d minutes ago.%n", elapsedMinutes);
+                        return false;
+                    } else {
+                        System.out.printf("[WARN] Host '%s' heartbeat expired (%d min elapsed). Reclaiming cloud lock...%n", activeHost, elapsedMinutes);
+                    }
+                } catch (Exception e) {
+                    System.err.println("[SPLIT-BRAIN GUARD] Unparseable lock timestamp: " + timestampStr + ". Acquisition aborted.");
+                    return false;
                 }
             }
         } else if (catRes.exitCode != 0) {
@@ -1125,8 +1561,16 @@ public class ServerLauncher {
             return false;
         }
 
-        String confirmedHost = extractJsonString(verifyRes.stdout, "host");
-        String confirmedLockId = extractJsonString(verifyRes.stdout, "lock_id");
+        MiniJson.JsonObject vObj;
+        try {
+            vObj = MiniJson.parseObjectStrict(verifyRes.stdout);
+        } catch (Exception e) {
+            System.err.println("[SPLIT-BRAIN GUARD] Verification read-back returned unparseable JSON: " + verifyRes.stdout);
+            return false;
+        }
+
+        String confirmedHost = vObj.getString("host");
+        String confirmedLockId = vObj.getString("lock_id");
 
         boolean won = candidateLockId.equals(confirmedLockId) || (confirmedLockId == null && host.equals(confirmedHost));
         if (!won) {
@@ -1140,27 +1584,369 @@ public class ServerLauncher {
         }
 
         activeLockId = candidateLockId;
+        // Instantiate and activate explicit hosting session
+        currentSession = new HostingSession(candidateLockId, host, staleMin, heartbeatSeconds);
         System.out.println("Cloud lock successfully acquired and verified by: " + host + " (ID: " + activeLockId.substring(0, 8) + ")");
         return true;
     }
 
-    public static void releaseCloudLock(Path rootDir, String rclone, String b2Target) {
+    public static boolean releaseCloudLock(Path rootDir, String rclone, String b2Target) {
+        return releaseCloudLock(rootDir, rclone, b2Target, activeLockId);
+    }
+
+    public static boolean releaseCloudLock(Path rootDir, String rclone, String b2Target, String expectedLockId) {
+        HostingSession session = currentSession;
+        if (session != null && session.getState() == SessionState.LOST) {
+            System.err.println("[STALE-HOST GUARD] Refusing to release cloud lock: Session is permanently LOST. The remote lock may belong to a successor host.");
+            return false;
+        }
+
+        String currentHeldLock = activeLockId;
+        String lockToCheck = (expectedLockId != null && !expectedLockId.isEmpty()) ? expectedLockId : currentHeldLock;
+
+        int staleMin = 12;
+        if (rootDir != null) {
+            Path cfg = rootDir.resolve("config.json");
+            if (Files.exists(cfg)) {
+                try {
+                    staleMin = extractJsonInt(Files.readString(cfg), "stale_timeout_minutes", 12);
+                } catch (Exception ignored) {}
+            }
+        }
+
+        CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
+        if (catRes.exitCode == 0) {
+            String out = catRes.stdout != null ? catRes.stdout.trim() : "";
+            if (out.isEmpty()) {
+                System.err.println("[SAFETY GUARD] Cloud lock payload is empty. Release aborted to prevent clobbering indeterminate state.");
+                return false;
+            }
+
+            MiniJson.JsonObject obj;
+            try {
+                obj = MiniJson.parseObjectStrict(out);
+            } catch (Exception e) {
+                System.err.println("[SAFETY GUARD] Cloud lock payload is malformed or unparseable JSON: " + out);
+                return false;
+            }
+
+            if (!obj.has("released") || !obj.has("host") || !obj.has("timestamp")) {
+                System.err.println("[SAFETY GUARD] Cloud lock payload lacks mandatory schema fields ('released', 'host', 'timestamp'): " + out);
+                return false;
+            }
+
+            boolean released;
+            try {
+                released = obj.getStrictBoolean("released");
+            } catch (MiniJson.ParseException pe) {
+                System.err.println("[SAFETY GUARD] Cloud lock 'released' field is malformed. Release aborted.");
+                return false;
+            }
+            if (released) {
+                activeLockId = null;
+                return true;
+            }
+
+            String cloudLockId = obj.getString("lock_id");
+            String cloudHost = obj.getString("host");
+            String cloudTimestamp = obj.getString("timestamp");
+
+            if (lockToCheck != null && !lockToCheck.isEmpty()) {
+                if (cloudLockId != null && !cloudLockId.isEmpty()) {
+                    if (!cloudLockId.equals(lockToCheck)) {
+                        System.err.printf("[SAFETY GUARD] Refusing to release foreign cloud lock! (Our lock: %s, Cloud lock: %s)%n",
+                                lockToCheck.length() > 8 ? lockToCheck.substring(0, 8) : lockToCheck,
+                                cloudLockId.length() > 8 ? cloudLockId.substring(0, 8) : cloudLockId);
+                        activeLockId = null;
+                        return false;
+                    }
+                } else if (cloudHost != null && !cloudHost.trim().isEmpty()) {
+                    if (!cloudHost.equalsIgnoreCase(getHostName())) {
+                        System.err.printf("[SAFETY GUARD] Refusing to release legacy foreign cloud lock held by '%s'!%n", cloudHost);
+                        activeLockId = null;
+                        return false;
+                    }
+                } else {
+                    System.err.println("[SAFETY GUARD] Active cloud lock lacks ownership identification. Release aborted.");
+                    return false;
+                }
+            } else {
+                System.err.println("[SAFETY GUARD] Refusing to release active cloud lock without holding a valid lock ID.");
+                return false;
+            }
+
+            // Distributed Lease Expiration Precondition:
+            // If the remote lock has expired (>= staleMin), another host may have reclaimed the lease.
+            // Withhold tombstone write to prevent clobbering the successor host's lock.
+            if (cloudTimestamp != null && !cloudTimestamp.isEmpty()) {
+                try {
+                    Instant lockTime = Instant.parse(cloudTimestamp);
+                    long elapsedMinutes = Duration.between(lockTime, Instant.now()).toMinutes();
+                    if (elapsedMinutes >= staleMin) {
+                        System.err.printf("[SAFETY GUARD] Local lease has expired (%d min >= %d min threshold). Withholding tombstone release to protect successor hosts.%n",
+                                elapsedMinutes, staleMin);
+                        activeLockId = null;
+                        return false;
+                    }
+                } catch (Exception e) {
+                    System.err.println("[SAFETY GUARD] Cloud lock timestamp unparseable: " + cloudTimestamp + ". Release aborted.");
+                    return false;
+                }
+            }
+        } else {
+            if (!isExplicitNotFound(catRes)) {
+                System.err.println("[SAFETY GUARD] Cannot verify cloud lock ownership due to cloud or network error: " +
+                        (catRes.stderr != null && !catRes.stderr.isEmpty() ? catRes.stderr : "Exit code " + catRes.exitCode));
+                System.err.println("Lock release aborted to prevent overwriting an unknown remote state.");
+                return false;
+            }
+        }
+
+        String tombstoneId = lockToCheck != null ? lockToCheck : "";
+        String tombstone = String.format("{\"host\":\"\",\"lock_id\":\"%s\",\"released\":true,\"timestamp\":\"1970-01-01T00:00:00Z\"}", tombstoneId);
+        // NOTE: Backblaze B2 does not support conditional PutObject (If-Match / If-None-Match).
+        // The tombstone is therefore written unconditionally. The race window is narrowed by the
+        // ownership check and lease-expiry precondition above, plus post-write read-back below,
+        // but cannot be fully closed at the storage layer. See PROVIDER LIMITATION comment above.
+        CommandResult res = runCommandWithInput(15, tombstone, rootDir, rclone, "rcat", b2Target + "/cluster.lock",
+                "--s3-no-head", "--s3-no-head-object");
+        if (res.exitCode != 0) {
+            System.err.println("[SAFETY GUARD] Failed to write tombstone to Backblaze B2 (Exit code " + res.exitCode + "): " + res.stderr);
+            return false;
+        }
+
+        // Post-Release Read-Back Verification: ensure tombstone write was observed and not clobbered
+        CommandResult verifyRes = readCloudLock(rootDir, rclone, b2Target);
+        if (verifyRes.exitCode != 0) {
+            System.err.println("[SAFETY GUARD] Post-release verification failed due to remote read error: " +
+                    (verifyRes.stderr != null && !verifyRes.stderr.isEmpty() ? verifyRes.stderr : "Exit code " + verifyRes.exitCode));
+            return false;
+        }
+        if (verifyRes.stdout == null || verifyRes.stdout.trim().isEmpty()) {
+            System.err.println("[SAFETY GUARD] Post-release verification failed: remote lock payload is empty.");
+            return false;
+        }
+        MiniJson.JsonObject vObj;
+        try {
+            vObj = MiniJson.parseObjectStrict(verifyRes.stdout);
+        } catch (Exception e) {
+            System.err.println("[SAFETY GUARD] Post-release verification failed: remote lock JSON is unparseable (" + e.getMessage() + ").");
+            return false;
+        }
+        if (!vObj.has("released")) {
+            System.err.println("[SAFETY GUARD] Post-release verification failed: remote lock missing 'released' attribute.");
+            return false;
+        }
+        boolean vReleased;
+        try {
+            vReleased = vObj.getStrictBoolean("released");
+        } catch (MiniJson.ParseException pe) {
+            System.err.println("[SAFETY GUARD] Post-release verification found malformed 'released' field.");
+            return false;
+        }
+        String vLockId = vObj.getString("lock_id");
+        if (!vReleased) {
+            System.err.printf("[SAFETY GUARD] Post-release verification failed: remote lock is not released (held by: %s, ID: %s).%n",
+                    vObj.getString("host"), vLockId);
+            return false;
+        }
+        if (!tombstoneId.isEmpty() && vLockId != null && !vLockId.isEmpty() && !tombstoneId.equals(vLockId)) {
+            System.err.printf("[SAFETY GUARD] Post-release verification failed: tombstone lock ID '%s' was overwritten by competing ID '%s'.%n",
+                    tombstoneId, vLockId);
+            return false;
+        }
         activeLockId = null;
+        return true;
+    }
+
+    public static boolean forceReleaseCloudLock(Path rootDir, String rclone, String b2Target) {
         String tombstone = "{\"host\":\"\",\"lock_id\":\"\",\"released\":true,\"timestamp\":\"1970-01-01T00:00:00Z\"}";
-        runCommandWithInput(15, tombstone, rootDir, rclone, "rcat", b2Target + "/cluster.lock", "--s3-no-head", "--s3-no-head-object");
+        CommandResult res = runCommandWithInput(15, tombstone, rootDir, rclone, "rcat", b2Target + "/cluster.lock", "--s3-no-head", "--s3-no-head-object");
+        if (res.exitCode != 0) {
+            return false;
+        }
+        activeLockId = null;
+        return true;
     }
 
     public static CommandResult writeCloudHeartbeat(Path rootDir, String rclone, String b2Target, String host) {
-        return writeCloudHeartbeat(rootDir, rclone, b2Target, host, activeLockId);
+        HostingSession session = currentSession;
+        String lockId = (session != null) ? session.getLockId() : activeLockId;
+        return writeCloudHeartbeat(rootDir, rclone, b2Target, host, lockId);
     }
 
     public static CommandResult writeCloudHeartbeat(Path rootDir, String rclone, String b2Target, String host, String lockId) {
-        String lockJson = (lockId != null && !lockId.isEmpty())
-                ? String.format("{\"host\":\"%s\",\"lock_id\":\"%s\",\"released\":false,\"timestamp\":\"%s\"}",
-                        host, lockId, DateTimeFormatter.ISO_INSTANT.format(Instant.now()))
-                : String.format("{\"host\":\"%s\",\"released\":false,\"timestamp\":\"%s\"}",
-                        host, DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        if (rootDir != null && isEmergencyModeActive(rootDir)) {
+            System.err.println("[EMERGENCY MODE] Refusing normal cluster lock heartbeat write.");
+            return new CommandResult(1, "", "Emergency mode heartbeat write rejected.");
+        }
+        HostingSession session = currentSession;
+        if (session != null && session.getState() == SessionState.LOST) {
+            System.err.println("[STALE-HOST GUARD] Refusing to write cloud heartbeat: Session is permanently LOST.");
+            return new CommandResult(1, "", "Session permanently LOST. Heartbeat refused.");
+        }
+        if (lockId == null || lockId.trim().isEmpty()) {
+            System.err.println("[STALE-HOST GUARD] Refusing unowned heartbeat write without valid lock ID.");
+            return new CommandResult(1, "", "Unowned heartbeat write rejected.");
+        }
+        String lockJson = String.format("{\"host\":\"%s\",\"lock_id\":\"%s\",\"released\":false,\"timestamp\":\"%s\"}",
+                host, lockId, DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
         return runCommandWithInput(15, lockJson, rootDir, rclone, "rcat", b2Target + "/cluster.lock", "--s3-no-head", "--s3-no-head-object");
+    }
+
+    /**
+     * Executes a verified heartbeat cycle for the active hosting session.
+     * Enforces that:
+     * 1. Session is not already LOST.
+     * 2. Remote lock is read and strictly verified to still match our active lock ID.
+     * 3. An interleaved or foreign lock immediately transitions the session to LOST and triggers fail-stop.
+     * 4. Heartbeat write is executed and then verified via read-back.
+     * 5. Only upon successful verification is the session lease deadline refreshed.
+     * 6. Transient network/read errors do NOT immediately mark LOST if within the lease safety window,
+     *    but once the monotonic deadline elapses, fail-stop is triggered permanently.
+     */
+    public static boolean renewHostingLease(Path rootDir, String rclone, String b2Target, String host) {
+        synchronized (heartbeatExecutionLock) {
+            HostingSession session = currentSession;
+            if (session == null) {
+                // If no session object, check legacy activeLockId fallback
+                if (activeLockId == null || activeLockId.isEmpty()) {
+                    System.err.println("[SAFETY GUARD] No active hosting session or lock ID to renew.");
+                    return false;
+                }
+                CommandResult res = writeCloudHeartbeat(rootDir, rclone, b2Target, host, activeLockId);
+                return res.exitCode == 0;
+            }
+
+            if (session.getState() == SessionState.LOST) {
+                System.err.println("[STALE-HOST GUARD] Cannot renew lease: Session is permanently LOST.");
+                return false;
+            }
+
+            // Check if deadline already elapsed locally
+            if (!session.isLeaseValid()) {
+                failStopActiveHosting(rootDir, "Local lease deadline elapsed prior to heartbeat cycle.");
+                return false;
+            }
+
+            String ourLockId = session.getLockId();
+
+            // Step 1: Pre-renewal remote verification
+            CommandResult catRes = readCloudLock(rootDir, rclone, b2Target);
+            if (catRes.exitCode == 0) {
+                String out = catRes.stdout != null ? catRes.stdout.trim() : "";
+                if (out.isEmpty()) {
+                    failStopActiveHosting(rootDir, "Cloud lock object is empty during heartbeat check.");
+                    return false;
+                }
+                MiniJson.JsonObject obj;
+                try {
+                    obj = MiniJson.parseObjectStrict(out);
+                } catch (Exception e) {
+                    failStopActiveHosting(rootDir, "Cloud lock object is malformed JSON during heartbeat check.");
+                    return false;
+                }
+
+                if (!obj.has("released") || !obj.has("host") || !obj.has("timestamp")) {
+                    failStopActiveHosting(rootDir, "Cloud lock object missing mandatory schema fields during heartbeat check.");
+                    return false;
+                }
+
+                boolean released;
+                try {
+                    released = obj.getStrictBoolean("released");
+                } catch (MiniJson.ParseException pe) {
+                    failStopActiveHosting(rootDir, "Cloud lock 'released' field is malformed JSON.");
+                    return false;
+                }
+                String remoteLockId = obj.getString("lock_id");
+                String remoteHost = obj.getString("host");
+
+                if (released) {
+                    failStopActiveHosting(rootDir, "Cloud lock has been marked released by an external process.");
+                    return false;
+                }
+
+                // Strict ownership check: lock ID must match our session
+                if (remoteLockId != null && !remoteLockId.isEmpty()) {
+                    if (!ourLockId.equals(remoteLockId)) {
+                        failStopActiveHosting(rootDir, String.format("Cloud lock owned by foreign lock ID '%s' (ours: '%s', host: '%s')",
+                                remoteLockId, ourLockId, remoteHost));
+                        return false;
+                    }
+                } else {
+                    // Lock missing lock ID or legacy format
+                    if (!host.equalsIgnoreCase(remoteHost)) {
+                        failStopActiveHosting(rootDir, String.format("Cloud lock held by foreign host '%s'", remoteHost));
+                        return false;
+                    }
+                }
+            } else {
+                if (isExplicitNotFound(catRes)) {
+                    failStopActiveHosting(rootDir, "Cloud lock object was deleted/missing from cloud storage.");
+                    return false;
+                }
+                // Transient cloud/network error during read: do not renew deadline, check if deadline exceeded
+                System.err.println("[WARN] Heartbeat pre-check read failed: " + catRes.stderr);
+                if (!session.isLeaseValid()) {
+                    failStopActiveHosting(rootDir, "Lease deadline elapsed during cloud read failure: " + catRes.stderr);
+                    return false;
+                }
+                return false;
+            }
+
+            // Step 2: Write refreshed heartbeat
+            CommandResult writeRes = writeCloudHeartbeat(rootDir, rclone, b2Target, host, ourLockId);
+            if (writeRes.exitCode != 0) {
+                System.err.println("[WARN] Heartbeat write failed (Code " + writeRes.exitCode + "): " + writeRes.stderr);
+                if (!session.isLeaseValid()) {
+                    failStopActiveHosting(rootDir, "Lease deadline elapsed following heartbeat write failure.");
+                }
+                return false;
+            }
+
+            // Step 3: Authoritative read-back verification
+            CommandResult verifyRes = readCloudLock(rootDir, rclone, b2Target);
+            if (verifyRes.exitCode != 0 || verifyRes.stdout == null || verifyRes.stdout.trim().isEmpty()) {
+                System.err.println("[WARN] Heartbeat read-back verification failed: " + verifyRes.stderr);
+                if (!session.isLeaseValid()) {
+                    failStopActiveHosting(rootDir, "Lease deadline elapsed during read-back verification failure.");
+                }
+                return false;
+            }
+
+            MiniJson.JsonObject vObj;
+            try {
+                vObj = MiniJson.parseObjectStrict(verifyRes.stdout);
+            } catch (Exception e) {
+                failStopActiveHosting(rootDir, "Heartbeat read-back returned corrupt JSON.");
+                return false;
+            }
+
+            String vLockId = vObj.getString("lock_id");
+            boolean vReleased;
+            try {
+                vReleased = vObj.getStrictBoolean("released");
+            } catch (MiniJson.ParseException pe) {
+                failStopActiveHosting(rootDir, "Heartbeat read-back has malformed 'released' field.");
+                return false;
+            }
+            if (vReleased || (vLockId != null && !ourLockId.equals(vLockId))) {
+                failStopActiveHosting(rootDir, String.format("Heartbeat was clobbered by competing write (remote ID: '%s', released: %b)",
+                        vLockId, vReleased));
+                return false;
+            }
+
+            // Successfully verified ownership
+            boolean updated = session.updateVerifiedHeartbeat();
+            if (updated) {
+                System.out.println("[Heartbeat] Verified ownership & extended lease for lock ID: " + ourLockId.substring(0, Math.min(8, ourLockId.length())));
+                return true;
+            } else {
+                failStopActiveHosting(rootDir, "Lease deadline expired before verified heartbeat could be recorded.");
+                return false;
+            }
+        }
     }
 
     public static CloudGenerationResult checkCloudGeneration(Path rootDir, String rclone, String b2Target) {
@@ -1170,13 +1956,27 @@ public class ServerLauncher {
         // Direct Class B read: manifest.json is present in established clusters; handles 404 as FRESH_BUCKET natively
         CommandResult res = runCommand(15, rootDir, rclone, "cat", b2Target + "/manifest.json", "--retries", "1");
         if (res.exitCode == 0 && !res.stdout.isEmpty()) {
-            int gen = extractJsonInt(res.stdout, "generation", -1);
-            String minVer = extractJsonString(res.stdout, "min_orchestrator_version");
-            String ts = extractJsonString(res.stdout, "timestamp");
+            MiniJson.JsonObject mObj;
+            try {
+                mObj = MiniJson.parseObjectStrict(res.stdout);
+            } catch (Exception e) {
+                return new CloudGenerationResult(-1, CloudGenerationResult.Status.CORRUPT_JSON, "Corrupted manifest.json in cloud (Malformed JSON: " + e.getMessage() + ")");
+            }
+            if (!mObj.has("generation")) {
+                return new CloudGenerationResult(-1, CloudGenerationResult.Status.CORRUPT_JSON, "Corrupted manifest.json in cloud (Missing 'generation' key)");
+            }
+            int gen;
+            try {
+                gen = mObj.getStrictInt("generation");
+            } catch (MiniJson.ParseException pe) {
+                return new CloudGenerationResult(-1, CloudGenerationResult.Status.CORRUPT_JSON, "Corrupted manifest.json in cloud (generation field invalid: " + pe.getMessage() + ")");
+            }
+            String minVer = mObj.getString("min_orchestrator_version");
+            String ts = mObj.getString("timestamp");
             if (gen > 0) {
                 return new CloudGenerationResult(gen, CloudGenerationResult.Status.OK, "Verified Cloud Generation #" + gen, minVer, ts);
             } else {
-                return new CloudGenerationResult(-1, CloudGenerationResult.Status.CORRUPT_JSON, "Corrupted manifest.json in cloud (Missing 'generation' key)");
+                return new CloudGenerationResult(-1, CloudGenerationResult.Status.CORRUPT_JSON, "Corrupted manifest.json in cloud (generation must be a positive integer, got: " + gen + ")");
             }
         }
         if (isQuotaExceeded(res)) {
@@ -1213,10 +2013,21 @@ public class ServerLauncher {
         return checkCloudGeneration(rootDir, rclone, b2Target).generation();
     }
 
-    public static void writeCloudGeneration(Path rootDir, String rclone, String b2Target, int gen, String host) {
+    public static boolean writeCloudGeneration(Path rootDir, String rclone, String b2Target, int gen, String host) {
         String json = String.format("{\"generation\":%d,\"last_host\":\"%s\",\"timestamp\":\"%s\",\"orchestrator_version\":\"%s\",\"min_orchestrator_version\":\"%s\"}",
                 gen, host, DateTimeFormatter.ISO_INSTANT.format(Instant.now()), APP_VERSION, APP_VERSION);
-        runCommandWithInput(15, json, rootDir, rclone, "rcat", b2Target + "/manifest.json", "--s3-no-head", "--s3-no-head-object");
+        CommandResult res = runCommandWithInput(15, json, rootDir, rclone, "rcat", b2Target + "/manifest.json", "--s3-no-head", "--s3-no-head-object");
+        if (res.exitCode != 0) {
+            System.err.println("[SAFETY GUARD] Failed to write manifest.json to cloud (Code: " + res.exitCode + "): " + res.stderr);
+            return false;
+        }
+        CloudGenerationResult verification = checkCloudGeneration(rootDir, rclone, b2Target);
+        if (verification.status() != CloudGenerationResult.Status.OK || verification.generation() != gen) {
+            System.err.println("[SAFETY GUARD] Manifest write could not be verified at Generation #" + gen
+                    + ". Observed: " + verification.detailMessage());
+            return false;
+        }
+        return true;
     }
 
     public static String readCloudMinVersion(Path rootDir, String rclone, String b2Target) {
@@ -1328,6 +2139,7 @@ public class ServerLauncher {
 - *.template.json
 - .server_active.lock
 - .cluster_session
+- .lost_host_recovery.json
 - cluster.lock
 - session.lock
 - **/session.lock
@@ -1367,6 +2179,26 @@ public class ServerLauncher {
 
     public static void triggerIncrementalPush(Path rootDir, String rclone, String b2Target, String bwLimit, BufferedWriter mcStdin) {
         if (isShuttingDown) return;
+        if (isEmergencyModeActive(rootDir)) {
+            System.err.println("[EMERGENCY MODE] Autosave cloud push skipped.");
+            return;
+        }
+        HostingSession session = currentSession;
+        if (session != null) {
+            if (session.getState() == SessionState.LOST) {
+                System.err.println("[STALE-HOST GUARD] Autosave cloud push skipped: Session is permanently LOST.");
+                return;
+            }
+            if (!session.isLeaseValid()) {
+                failStopActiveHosting(rootDir, "Lease expired prior to autosave cloud push.");
+                return;
+            }
+        }
+        if (hasDivergentMarker(rootDir)) {
+            System.err.println("[STALE-HOST GUARD] Autosave cloud push skipped: World is marked divergent.");
+            return;
+        }
+
         if (!isPushActive.compareAndSet(false, true)) {
             System.out.println("[Autosave] Cloud sync already in flight; skipping overlapping cycle.");
             return;
@@ -1385,6 +2217,22 @@ public class ServerLauncher {
                         System.out.println("[Autosave] Initiated atomic chunk save & disk flush. Settling disk cache...");
                         Thread.sleep(3000);
                     } catch (Exception ignored) {}
+                }
+
+                HostingSession pushSession = currentSession;
+                if (pushSession != null) {
+                    if (pushSession.getState() == SessionState.LOST) {
+                        failStopActiveHosting(rootDir, "Session became LOST immediately before incremental upload.");
+                        return;
+                    }
+                    if (!pushSession.isLeaseValid()) {
+                        failStopActiveHosting(rootDir, "Lease expired immediately before incremental upload.");
+                        return;
+                    }
+                }
+                if (hasDivergentMarker(rootDir)) {
+                    failStopActiveHosting(rootDir, "Divergent marker detected immediately before incremental upload.");
+                    return;
                 }
 
                 String limit = (bwLimit != null && !bwLimit.isEmpty()) ? bwLimit : "10M";
@@ -1625,38 +2473,97 @@ public class ServerLauncher {
         } catch (Exception ignored) {}
     }
 
-    public static void publishAdminUpdate(Path rootDir, String rclone, String b2Target) {
+    public static boolean publishAdminUpdate(Path rootDir, String rclone, String b2Target) {
+        HostingSession session = currentSession;
+        if (session != null && session.getState() == SessionState.LOST) {
+            System.err.println("[STALE-HOST GUARD] Administrative update publish rejected: Hosting session is permanently LOST.");
+            return false;
+        }
+        if (session != null && !session.isLeaseValid()) {
+            failStopActiveHosting(rootDir, "Lease expired before administrative update publish.");
+            return false;
+        }
+        if (hasDivergentMarker(rootDir)) {
+            System.err.println("[STALE-HOST GUARD] Administrative update publish rejected: world is marked divergent.");
+            return false;
+        }
+
         System.out.println("\n========================================================");
         System.out.println("[MC Cluster] Publishing Administrative Update to Cloud...");
         System.out.println("========================================================");
 
-        // Synchronize runtime server assets (plugins, core.dat, configs, daemons) to b2Target/dist
-        System.out.println("[1/1] Synchronizing runtime server assets (plugins, core, configs, daemons) to B2...");
+        // Step 1: Validate cloud manifest BEFORE copying any files.
+        // A corrupt or missing manifest should abort the publish before mutating dist.
+        System.out.println("[1/3] Verifying cloud manifest preconditions...");
+        CloudGenerationResult cCheck = checkCloudGeneration(rootDir, rclone, b2Target);
+        if (cCheck.status() != CloudGenerationResult.Status.OK && cCheck.status() != CloudGenerationResult.Status.FRESH_BUCKET) {
+            System.err.println("[ERROR] Cannot publish: failed to verify cloud generation: " + cCheck.detailMessage());
+            return false;
+        }
+        int currentGen = cCheck.generation();
+        if (currentGen < 0) {
+            System.err.println("[ERROR] Cannot publish: invalid cloud generation (" + currentGen + ") detected. Aborting.");
+            return false;
+        }
+
+        // Step 2: Synchronize runtime server assets (plugins, core.dat, configs, daemons) to b2Target/dist.
+        // rclone copy is idempotent; a partial failure here is safe to retry.
+        System.out.println("[2/3] Synchronizing runtime server assets (plugins, core, configs, daemons) to B2...");
         Path filterPath = rootDir.resolve("admin-dist-filter.txt");
         String[] cmd;
         if (Files.exists(filterPath)) {
-            cmd = new String[]{rclone, "copy", ".", b2Target + "/dist", "--filter-from", filterPath.toString(), 
+            cmd = new String[]{rclone, "copy", ".", b2Target + "/dist", "--filter-from", filterPath.toString(),
                 "--fast-list", "--use-server-modtime", "--update", "--s3-no-head"};
         } else {
-            cmd = new String[]{rclone, "copy", "plugins", b2Target + "/dist/plugins", 
+            cmd = new String[]{rclone, "copy", "plugins", b2Target + "/dist/plugins",
                 "--fast-list", "--use-server-modtime", "--update", "--s3-no-head"};
         }
         CommandResult res = runCommand(rootDir, cmd);
 
-        if (res.exitCode == 0) {
-            int currentGen = readCloudGeneration(rootDir, rclone, b2Target);
-            writeCloudGeneration(rootDir, rclone, b2Target, currentGen, getHostName());
-            System.out.println("[3/3] Enforced orchestrator version v" + APP_VERSION + " in cloud manifest.");
-            System.out.println("\n========================================================");
-            System.out.println("[SUCCESS] Cluster update published successfully to Backblaze B2!");
-            System.out.println("  Cloud channel: " + b2Target + "/dist");
-            System.out.println("  World files, save generations, and active locks were untouched.");
-            System.out.println("  Next time any hoster boots via START_SERVER, their machine");
-            System.out.println("  will silently pull the new core, plugins, configs, and binaries.");
-            System.out.println("========================================================\n");
-        } else {
-            System.err.println("[ERROR] Failed to publish administrative update: " + res.stderr);
+        if (res.exitCode != 0) {
+            System.err.println("[ERROR] Failed to publish administrative update (rclone copy failed): " + res.stderr);
+            System.err.println("[WARN] A partial publish may have occurred. Retry is safe — rclone copy is idempotent.");
+            return false;
         }
+
+        if (session != null && session.getState() == SessionState.LOST) {
+            System.err.println("[STALE-HOST GUARD] Administrative update copy completed but the session became LOST.");
+            return false;
+        }
+        if (session != null && !session.isLeaseValid()) {
+            failStopActiveHosting(rootDir, "Lease expired during administrative update copy.");
+            return false;
+        }
+
+        CloudGenerationResult postCopyCheck = checkCloudGeneration(rootDir, rclone, b2Target);
+        if (postCopyCheck.status() != CloudGenerationResult.Status.OK
+                && postCopyCheck.status() != CloudGenerationResult.Status.FRESH_BUCKET) {
+            System.err.println("[ERROR] Cannot publish: cloud manifest changed to an invalid state during copy.");
+            return false;
+        }
+        if (postCopyCheck.generation() != currentGen) {
+            System.err.printf("[ERROR] Cannot publish: cloud generation changed during copy (was #%d, now #%d). Retry safely.%n",
+                    currentGen, postCopyCheck.generation());
+            return false;
+        }
+
+        // Step 3: Increment and write manifest generation.
+        int nextGen = currentGen + 1;
+        boolean manifestOk = writeCloudGeneration(rootDir, rclone, b2Target, nextGen, getHostName());
+        if (!manifestOk) {
+            System.err.println("[ERROR] Administrative update copied, but updating cloud manifest.json failed or timed out.");
+            System.err.println("[WARN] Distribution was updated but generation counter was not incremented. Retry the publish to fix.");
+            return false;
+        }
+        System.out.println("[3/3] Enforced orchestrator version v" + APP_VERSION + " in cloud manifest.");
+        System.out.println("\n========================================================");
+        System.out.println("[SUCCESS] Cluster update published successfully to Backblaze B2!");
+        System.out.println("  Cloud channel: " + b2Target + "/dist");
+        System.out.println("  World files, save generations, and active locks were untouched.");
+        System.out.println("  Next time any hoster boots via START_SERVER, their machine");
+        System.out.println("  will silently pull the new core, plugins, configs, and binaries.");
+        System.out.println("========================================================\n");
+        return true;
     }
 
     public static void syncAdminDistribution(Path rootDir, String rclone, String b2Target) {
@@ -1819,22 +2726,25 @@ public class ServerLauncher {
     }
 
     public static CommandResult runCommand(long timeoutSeconds, Path workingDir, String... command) {
+        Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(command);
             if (workingDir != null) pb.directory(workingDir.toFile());
             if (!RCLONE_ENV.isEmpty()) {
                 pb.environment().putAll(RCLONE_ENV);
             }
-            Process p = pb.start();
+            p = pb.start();
+            activeRcloneProcesses.add(p);
+            final Process trackedProcess = p;
             StringBuilder stdout = new StringBuilder();
             StringBuilder stderr = new StringBuilder();
             Thread outThread = new Thread(() -> {
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(trackedProcess.getInputStream(), StandardCharsets.UTF_8))) {
                     String l; while ((l = r.readLine()) != null) stdout.append(l).append("\n");
                 } catch (IOException ignored) {}
             });
             Thread errThread = new Thread(() -> {
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getErrorStream(), StandardCharsets.UTF_8))) {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(trackedProcess.getErrorStream(), StandardCharsets.UTF_8))) {
                     String l; while ((l = r.readLine()) != null) stderr.append(l).append("\n");
                 } catch (IOException ignored) {}
             });
@@ -1856,6 +2766,10 @@ public class ServerLauncher {
             return new CommandResult(p.exitValue(), stdout.toString().trim(), stderr.toString().trim());
         } catch (Exception e) {
             return new CommandResult(-1, "", e.getMessage());
+        } finally {
+            if (p != null) {
+                activeRcloneProcesses.remove(p);
+            }
         }
     }
 
@@ -1864,13 +2778,16 @@ public class ServerLauncher {
     }
 
     public static CommandResult runCommandWithInput(long timeoutSeconds, String input, Path workingDir, String... command) {
+        Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(command);
             if (workingDir != null) pb.directory(workingDir.toFile());
             if (!RCLONE_ENV.isEmpty()) {
                 pb.environment().putAll(RCLONE_ENV);
             }
-            Process p = pb.start();
+            p = pb.start();
+            activeRcloneProcesses.add(p);
+            final Process trackedProcess = p;
             if (input != null) {
                 try (OutputStream os = p.getOutputStream()) {
                     os.write(input.getBytes(StandardCharsets.UTF_8));
@@ -1880,12 +2797,12 @@ public class ServerLauncher {
             StringBuilder stdout = new StringBuilder();
             StringBuilder stderr = new StringBuilder();
             Thread outThread = new Thread(() -> {
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(trackedProcess.getInputStream(), StandardCharsets.UTF_8))) {
                     String l; while ((l = r.readLine()) != null) stdout.append(l).append("\n");
                 } catch (IOException ignored) {}
             });
             Thread errThread = new Thread(() -> {
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getErrorStream(), StandardCharsets.UTF_8))) {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(trackedProcess.getErrorStream(), StandardCharsets.UTF_8))) {
                     String l; while ((l = r.readLine()) != null) stderr.append(l).append("\n");
                 } catch (IOException ignored) {}
             });
@@ -1907,6 +2824,10 @@ public class ServerLauncher {
             return new CommandResult(p.exitValue(), stdout.toString().trim(), stderr.toString().trim());
         } catch (Exception e) {
             return new CommandResult(-1, "", e.getMessage());
+        } finally {
+            if (p != null) {
+                activeRcloneProcesses.remove(p);
+            }
         }
     }
 
@@ -2114,24 +3035,43 @@ public class ServerLauncher {
     }
 
     public static String extractJsonString(String json, String key) {
-        Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*\"([^\"]+)\"").matcher(json);
-        return m.find() ? m.group(1).trim() : "";
+        if (json == null || json.isEmpty()) return "";
+        MiniJson.JsonObject obj = MiniJson.parseObject(json);
+        if (obj == null) {
+            Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"").matcher(json);
+            return m.find() ? m.group(1).trim() : "";
+        }
+        return obj.findString(key, "");
     }
 
     public static boolean extractJsonBoolean(String json, String key, boolean def) {
-        if (json == null) return def;
-        Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*(true|false)", Pattern.CASE_INSENSITIVE).matcher(json);
-        return m.find() ? Boolean.parseBoolean(m.group(1)) : def;
+        if (json == null || json.isEmpty()) return def;
+        MiniJson.JsonObject obj = MiniJson.parseObject(json);
+        if (obj == null) {
+            Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*(true|false)", Pattern.CASE_INSENSITIVE).matcher(json);
+            return m.find() ? Boolean.parseBoolean(m.group(1)) : def;
+        }
+        return obj.findBoolean(key, def);
     }
 
     public static int extractJsonInt(String json, String key, int def) {
-        Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*([0-9]+)").matcher(json);
-        return m.find() ? Integer.parseInt(m.group(1)) : def;
+        if (json == null || json.isEmpty()) return def;
+        MiniJson.JsonObject obj = MiniJson.parseObject(json);
+        if (obj == null) {
+            Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*([0-9]+)").matcher(json);
+            return m.find() ? Integer.parseInt(m.group(1)) : def;
+        }
+        return obj.findInt(key, def);
     }
 
     public static long extractJsonLong(String json, String key, long def) {
-        Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*([0-9]+)").matcher(json);
-        return m.find() ? Long.parseLong(m.group(1)) : def;
+        if (json == null || json.isEmpty()) return def;
+        MiniJson.JsonObject obj = MiniJson.parseObject(json);
+        if (obj == null) {
+            Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*([0-9]+)").matcher(json);
+            return m.find() ? Long.parseLong(m.group(1)) : def;
+        }
+        return obj.findLong(key, def);
     }
 
     public static boolean isQuotaExceeded(CommandResult res) {
@@ -2409,6 +3349,202 @@ public class ServerLauncher {
         }
     }
 
+    private static String normalizeZipEntryName(String entryName) throws IOException {
+        if (entryName == null || entryName.isEmpty()) {
+            throw new IOException("Sync pack contains an invalid empty entry name.");
+        }
+        String normalized = entryName.replace('\\', '/');
+        if (normalized.startsWith("/") || normalized.matches("^[A-Za-z]:[/\\\\].*")) {
+            throw new IOException("Sync pack contains an unsafe absolute entry: " + entryName);
+        }
+        for (String segment : normalized.split("/")) {
+            if ("..".equals(segment)) {
+                throw new IOException("Sync pack contains a path traversal entry: " + entryName);
+            }
+        }
+        return normalized;
+    }
+
+    private static void validateZipEntryName(String entryName, Path targetRoot) throws IOException {
+        String normalized = normalizeZipEntryName(entryName);
+        ensureZipDestinationWithinRoot(targetRoot, targetRoot.resolve(normalized));
+    }
+
+    private static void ensureZipDestinationWithinRoot(Path targetRoot, Path destination) throws IOException {
+        Path normalizedDestination = destination.toAbsolutePath().normalize();
+        if (!normalizedDestination.startsWith(targetRoot)) {
+            throw new IOException("Sync pack entry resolves outside the target directory: " + destination);
+        }
+    }
+
+    private static boolean isSyncPackMetadataEntry(String name) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        return lower.startsWith("__macosx/")
+                || lower.endsWith("/.ds_store")
+                || lower.endsWith("/thumbs.db")
+                || lower.equals(".ds_store")
+                || lower.equals("thumbs.db");
+    }
+
+    private static boolean isSyncPackMarkerPath(String name) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        String[] segments = lower.split("/");
+        if (segments.length == 0) return false;
+
+        for (String segment : segments) {
+            if ("world".equals(segment)
+                    || "plugins".equals(segment)
+                    || "bin".equals(segment)
+                    || "manifest.json".equals(segment)
+                    || ".cluster_session".equals(segment)
+                    || "server.properties".equals(segment)
+                    || "eula.txt".equals(segment)
+                    || "playit.toml".equals(segment)
+                    || "rclone-filter.txt".equals(segment)
+                    || "admin-dist-filter.txt".equals(segment)
+                    || "minecraftcluster.exe".equals(segment)
+                    || "serverlauncher.jar".equals(segment)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String longestCommonDirectoryPrefix(List<String> names) {
+        if (names.isEmpty()) return "";
+
+        List<String[]> splitNames = new ArrayList<>();
+        for (String name : names) {
+            if (!name.isEmpty()) splitNames.add(name.split("/"));
+        }
+        if (splitNames.isEmpty()) return "";
+
+        int commonLength = splitNames.get(0).length;
+        if (!names.get(0).endsWith("/")) commonLength--;
+
+        for (ListIterator<String[]> it = splitNames.listIterator(1); it.hasNext();) {
+            String[] other = it.next();
+            int i = 0;
+            while (i < commonLength && i < other.length
+                    && splitNames.get(0)[i].equalsIgnoreCase(other[i])) {
+                i++;
+            }
+            commonLength = i;
+            if (commonLength == 0) break;
+        }
+        if (commonLength <= 0) return "";
+        return String.join("/", Arrays.copyOf(splitNames.get(0), commonLength));
+    }
+
+    private static String inferSyncPackRoot(List<String> names) {
+        List<String> significant = new ArrayList<>();
+        for (String name : names) {
+            if (!name.isEmpty() && !isSyncPackMetadataEntry(name)) {
+                significant.add(name);
+            }
+        }
+        if (significant.isEmpty()) return "";
+
+        List<String> markerPrefixes = new ArrayList<>();
+        for (String name : significant) {
+            String[] segments = name.split("/");
+            for (int i = 0; i < segments.length; i++) {
+                String segment = segments[i].toLowerCase(Locale.ROOT);
+                if ("world".equals(segment)
+                        || "plugins".equals(segment)
+                        || "bin".equals(segment)
+                        || "manifest.json".equals(segment)
+                        || ".cluster_session".equals(segment)
+                        || "server.properties".equals(segment)
+                        || "eula.txt".equals(segment)
+                        || "playit.toml".equals(segment)
+                        || "rclone-filter.txt".equals(segment)
+                        || "admin-dist-filter.txt".equals(segment)
+                        || "minecraftcluster.exe".equals(segment)
+                        || "serverlauncher.jar".equals(segment)) {
+                    String prefix = i == 0 ? "" : String.join("/", Arrays.copyOf(segments, i));
+                    markerPrefixes.add(prefix);
+                    break;
+                }
+            }
+        }
+
+        if (!markerPrefixes.isEmpty()) {
+            String bestPrefix = "";
+            int bestCount = -1;
+            for (String candidate : new HashSet<>(markerPrefixes)) {
+                int count = 0;
+                for (String prefix : markerPrefixes) {
+                    if (candidate.equalsIgnoreCase(prefix)) count++;
+                }
+                if (count > bestCount
+                        || (count == bestCount && candidate.length() > bestPrefix.length())) {
+                    bestPrefix = candidate;
+                    bestCount = count;
+                }
+            }
+            if (bestCount * 2 > markerPrefixes.size()) {
+                return bestPrefix;
+            }
+        }
+
+        String commonPrefix = longestCommonDirectoryPrefix(significant);
+        if (!commonPrefix.isEmpty()) {
+            for (String name : significant) {
+                if (!name.regionMatches(true, 0, commonPrefix + "/", 0, commonPrefix.length() + 1)) {
+                    return "";
+                }
+            }
+            return commonPrefix;
+        }
+        return "";
+    }
+
+    private static String inspectSyncPackRoot(Path zipPath) throws IOException {
+        List<String> names = new ArrayList<>();
+        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(zipPath)))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                String name = normalizeZipEntryName(entry.getName());
+                if (!entry.isDirectory() && !isSyncPackMetadataEntry(name)) {
+                    names.add(name);
+                }
+                zis.closeEntry();
+            }
+        }
+        if (names.isEmpty()) {
+            throw new IOException("The selected ZIP contains no files.");
+        }
+
+        String root = inferSyncPackRoot(names);
+        List<String> flattenedNames = new ArrayList<>();
+        for (String name : names) {
+            String flattened = root.isEmpty() ? name : removeSyncPackRoot(name, root);
+            if (!flattened.isEmpty()) flattenedNames.add(flattened);
+        }
+
+        boolean hasRecognizedContent = false;
+        for (String name : flattenedNames) {
+            if (isSyncPackMarkerPath(name)) {
+                hasRecognizedContent = true;
+                break;
+            }
+        }
+        if (!hasRecognizedContent) {
+            throw new IOException("The selected ZIP is not recognized as a Minecraft Cluster co-host pack.");
+        }
+        return root;
+    }
+
+    private static String removeSyncPackRoot(String name, String root) {
+        if (root == null || root.isEmpty()) return name;
+        String prefix = root + "/";
+        if (name.regionMatches(true, 0, prefix, 0, prefix.length())) {
+            return name.substring(prefix.length());
+        }
+        return name;
+    }
+
     public static String importStarterPack(Path zipPath, Path targetDir, ClusterRegistry registry, java.util.function.Consumer<String> logger) throws IOException {
         if (logger == null) logger = System.out::println;
         logger.accept("[Starter Pack] Unpacking starter pack from " + zipPath + "...");
@@ -2416,6 +3552,8 @@ public class ServerLauncher {
         if (!Files.exists(targetDir)) {
             Files.createDirectories(targetDir);
         }
+        Path targetRoot = targetDir.toAbsolutePath().normalize();
+        String packageRoot = inspectSyncPackRoot(zipPath);
 
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(zipPath)))) {
             ZipEntry entry;
@@ -2423,11 +3561,26 @@ public class ServerLauncher {
             int entryCount = 0;
             while ((entry = zis.getNextEntry()) != null) {
                 entryCount++;
-                String entryName = entry.getName();
+                String entryName = normalizeZipEntryName(entry.getName());
+                if (entry.isDirectory()) {
+                    zis.closeEntry();
+                    continue;
+                }
+                if (isSyncPackMetadataEntry(entryName)) {
+                    zis.closeEntry();
+                    continue;
+                }
+                entryName = removeSyncPackRoot(entryName, packageRoot);
+                if (entryName.isEmpty()) {
+                    zis.closeEntry();
+                    continue;
+                }
+                validateZipEntryName(entryName, targetRoot);
                 if (entryCount % 15 == 0 || entryName.endsWith(".jar") || entryName.endsWith(".mca") || entryName.endsWith(".dat") || entryName.endsWith(".json")) {
                     logger.accept("[Starter Pack] Extracting: " + entryName);
                 }
                 Path outPath = targetDir.resolve(entryName);
+                ensureZipDestinationWithinRoot(targetRoot, outPath);
                 if (entry.isDirectory()) {
                     Files.createDirectories(outPath);
                 } else {
@@ -2510,12 +3663,28 @@ public class ServerLauncher {
 
         int newGen = -1;
         int entryCount = 0;
+        Path targetRoot = rootDir.toAbsolutePath().normalize();
+        String packageRoot = inspectSyncPackRoot(zipPath);
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(zipPath)))) {
             ZipEntry entry;
             byte[] buf = new byte[8192];
             while ((entry = zis.getNextEntry()) != null) {
                 entryCount++;
-                String name = entry.getName();
+                String name = normalizeZipEntryName(entry.getName());
+                if (entry.isDirectory()) {
+                    zis.closeEntry();
+                    continue;
+                }
+                if (isSyncPackMetadataEntry(name)) {
+                    zis.closeEntry();
+                    continue;
+                }
+                name = removeSyncPackRoot(name, packageRoot);
+                if (name.isEmpty()) {
+                    zis.closeEntry();
+                    continue;
+                }
+                validateZipEntryName(name, targetRoot);
                 if (entryCount % 15 == 0 || name.endsWith(".jar") || name.endsWith(".mca") || name.endsWith(".dat") || name.endsWith(".json")) {
                     logger.accept("[Co-host Sync] Updating: " + name);
                 }
@@ -2524,7 +3693,33 @@ public class ServerLauncher {
                     zis.closeEntry();
                     continue;
                 }
+
+                // A running Windows executable cannot be overwritten in place.
+                // Preserve the running launcher and report that the sync pack did not replace it.
+                if ("MinecraftCluster.exe".equalsIgnoreCase(name)) {
+                    logger.accept("[Co-host Sync] Preserved running MinecraftCluster.exe; launcher executable is updated separately.");
+                    zis.closeEntry();
+                    continue;
+                }
+
+                // Stage a JAR update beside the running JAR. The existing launcher startup
+                // applies ServerLauncher.jar.update after the process exits.
+                if ("ServerLauncher.jar".equalsIgnoreCase(name)) {
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    int read;
+                    while ((read = zis.read(buf)) != -1) {
+                        baos.write(buf, 0, read);
+                    }
+                    Path stagedJar = rootDir.resolve("ServerLauncher.jar.update");
+                    Files.write(stagedJar, baos.toByteArray(),
+                            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+                    logger.accept("[Co-host Sync] Staged launcher JAR for next restart: ServerLauncher.jar.update");
+                    zis.closeEntry();
+                    continue;
+                }
+
                 Path outPath = rootDir.resolve(name);
+                ensureZipDestinationWithinRoot(targetRoot, outPath);
                 if (entry.isDirectory()) {
                     Files.createDirectories(outPath);
                 } else {

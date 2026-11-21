@@ -98,6 +98,28 @@ public class TestDirectWorldSafety {
                 failures++;
             }
 
+            // Case 4: World Chunk Copy Succeeds, but manifest.json Write Fails -> pushToB2 fails closed
+            MockRcloneHarness.reset();
+            MockRcloneHarness.setRule("manifestJson", "{\"generation\":26,\"last_host\":\"OtherNode\",\"min_orchestrator_version\":\"2.1.10\"}");
+            MockRcloneHarness.setRule("manifestWriteExitCode", "1"); // Force manifest write to fail
+            Files.writeString(tempServerDir.resolve(".cluster_session"), "{\"base_generation\":26}", StandardCharsets.UTF_8);
+
+            boolean pushResult4 = ServerLauncher.pushToB2(tempServerDir, mockRclone, b2Target, "TestHost", 12, "10M", true);
+            if (!pushResult4) {
+                System.out.println("  ✓ PASS: pushToB2() DIRECTLY returned false when manifest.json write failed");
+            } else {
+                System.err.println("  ✗ FAIL: pushToB2() reported success despite manifest write failure!");
+                failures++;
+            }
+
+            int localGenAfterFail = ServerLauncher.readLocalGeneration(tempServerDir);
+            if (localGenAfterFail == 26) {
+                System.out.println("  ✓ PASS: Local generation remained at #26 (unbumped) following manifest failure");
+            } else {
+                System.err.println("  ✗ FAIL: Local generation was bumped despite manifest write failure: " + localGenAfterFail);
+                failures++;
+            }
+
         } finally {
             MockRcloneHarness.teardown();
             if (Files.exists(tempServerDir)) {

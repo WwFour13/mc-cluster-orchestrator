@@ -1967,14 +1967,32 @@ public class ClusterGUI extends JFrame {
                     return;
                 }
 
+                // Stale-host recovery check: If previous session lost ownership, local world is divergent
+                if (ServerLauncher.hasDivergentMarker(rootDir)) {
+                    appendConsoleLog("[RECOVERY REQUIRED] Local world is marked divergent from a previously lost session.");
+                    int recoveryChoice = JOptionPane.showConfirmDialog(this,
+                            "STALE-HOST RECOVERY REQUIRED\n\n" +
+                            "Your previous hosting session lost cloud ownership (its lease expired or was superseded).\n" +
+                            "Your unpushed local progress was safely preserved, but cannot be published automatically.\n\n" +
+                            "To resume hosting, the latest cloud cluster state must be pulled.\n" +
+                            "A backup of your local world will be saved in backups/.\n\n" +
+                            "Proceed with cloud recovery synchronization?",
+                            "Divergent Local State", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                    if (recoveryChoice != JOptionPane.YES_OPTION) {
+                        abortLaunch("STALE-HOST RECOVERY ABORTED\n\n" +
+                                "Launch cancelled. Your divergent local world remains in world/ and backups/.\n" +
+                                "Resolve divergence or pull fresh cloud data before hosting again.");
+                        return;
+                    }
+                }
+
                 // Milestone 2: Cloud Lock
                 updateMilestoneStep(1, "2. Cloud Lock...", COLOR_AMBER, 35);
                 appendConsoleLog("[Step 2/5] Acquiring cluster cloud lock...");
                 boolean isEmergency = ServerLauncher.isEmergencyModeActive(rootDir);
                 if (isEmergency) {
-                    appendConsoleLog("[EMERGENCY MODE] Active: Bypassing cloud read lock check. Pulsing lock heartbeat...");
-                    ServerLauncher.writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
-                } else if (!ServerLauncher.acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin)) {
+                    appendConsoleLog("[EMERGENCY MODE] Active: Bypassing cloud read lock check. No normal cluster lock heartbeat is written.");
+                } else if (!ServerLauncher.acquireCloudLock(rootDir, rclone, b2Target, localHost, staleMin, heartbeatSec)) {
                     // Check if failure was due to quota and local world exists: offer emergency mode!
                     if (lastCloudGenerationResult != null &&
                         lastCloudGenerationResult.status() == ServerLauncher.CloudGenerationResult.Status.QUOTA_EXCEEDED &&
@@ -1995,8 +2013,7 @@ public class ClusterGUI extends JFrame {
                         if (emChoice[0] == JOptionPane.YES_OPTION) {
                             ServerLauncher.activateEmergencyMode(rootDir, localHost, ServerLauncher.readLocalGeneration(rootDir), "QUOTA_EXCEEDED");
                             isEmergency = true;
-                            appendConsoleLog("[EMERGENCY MODE] Activated by user. Pulsing cloud lock heartbeat...");
-                            ServerLauncher.writeCloudHeartbeat(rootDir, rclone, b2Target, localHost);
+                            appendConsoleLog("[EMERGENCY MODE] Activated by user. Normal cluster lock heartbeat is disabled.");
                         } else {
                             abortLaunch("CLOUD QUOTA EXCEEDED (LAUNCH BLOCKED)\n\n" +
                                     "Backblaze B2 daily download/transaction quota exceeded.\n" +
@@ -2040,7 +2057,9 @@ public class ClusterGUI extends JFrame {
                     int cloudGen = cloudCheck.generation();
                     int localGen = ServerLauncher.readLocalGeneration(rootDir);
 
-                    if (localGen > 0 && cloudGen > 0 && localGen == cloudGen && !ServerLauncher.isWorldEmpty(rootDir)) {
+                    if (!ServerLauncher.hasDivergentMarker(rootDir)
+                            && localGen > 0 && cloudGen > 0 && localGen == cloudGen
+                            && !ServerLauncher.isWorldEmpty(rootDir)) {
                         appendConsoleLog(String.format("[B2 Sync] Local base matches Cloud Generation #%d. Zero-egress bypass active (0 MB downloaded).", cloudGen));
                         updateMilestoneStep(2, "3. Synchronized (0 MB)", COLOR_EMERALD, 65);
                     } else {
@@ -2133,9 +2152,9 @@ public class ClusterGUI extends JFrame {
                 heartbeatScheduler.scheduleAtFixedRate(() -> {
                     try {
                         ServerLauncher.writeLockFile(lockPath, localHost);
-                        ServerLauncher.writeCloudHeartbeat(rootDir, finalRclone, finalB2, localHost);
+                        ServerLauncher.renewHostingLease(rootDir, finalRclone, finalB2, localHost);
                     } catch (Exception ignored) {}
-                }, heartbeatSec, heartbeatSec, TimeUnit.SECONDS);
+                }, 0, heartbeatSec, TimeUnit.SECONDS);
 
                 if (finalB2 != null && !finalB2.isEmpty()) {
                     heartbeatScheduler.scheduleAtFixedRate(() -> {
@@ -2258,7 +2277,7 @@ public class ClusterGUI extends JFrame {
         }
 
         ServerLauncher.cleanup(rootDir, lockPath, rclone, b2Target, localHost, staleMin, bwLimit,
-                null, null);
+                null, null, true);
 
         isServerRunning = false;
         SwingUtilities.invokeLater(() -> {
@@ -2284,24 +2303,31 @@ public class ClusterGUI extends JFrame {
 
     private void abortLaunch(String reason) {
         isServerRunning = false;
-        workerPool.submit(() -> {
+        String lockIdToRelease = ServerLauncher.getActiveLockId();
+        if (lockIdToRelease != null && !lockIdToRelease.isEmpty()) {
+            workerPool.submit(() -> {
+                try {
+                    Files.deleteIfExists(rootDir.resolve(".server_active.lock"));
+                    Path cfg = rootDir.resolve("config.json");
+                    if (Files.exists(cfg)) {
+                        String json = Files.readString(cfg);
+                        String bucket = ServerLauncher.extractJsonString(json, "b2_bucket");
+                        String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
+                        String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
+                        if (bucket != null && keyId != null && appKey != null) {
+                            String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
+                            String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
+                            String rclone = ServerLauncher.findRclone(rootDir);
+                            ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target, lockIdToRelease);
+                        }
+                    }
+                } catch (Exception ignored) {}
+            });
+        } else {
             try {
                 Files.deleteIfExists(rootDir.resolve(".server_active.lock"));
-                Path cfg = rootDir.resolve("config.json");
-                if (Files.exists(cfg)) {
-                    String json = Files.readString(cfg);
-                    String bucket = ServerLauncher.extractJsonString(json, "b2_bucket");
-                    String keyId = ServerLauncher.extractJsonString(json, "b2_key_id");
-                    String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
-                    if (bucket != null && keyId != null && appKey != null) {
-                        String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
-                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
-                        String rclone = ServerLauncher.findRclone(rootDir);
-                        ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
-                    }
-                }
             } catch (Exception ignored) {}
-        });
+        }
         SwingUtilities.invokeLater(() -> {
             if (clusterSelector != null) clusterSelector.setEnabled(true);
             updatePrimaryButtonState();
@@ -2695,8 +2721,8 @@ public class ClusterGUI extends JFrame {
                     String appKey = ServerLauncher.extractJsonString(json, "b2_application_key");
                     String rclone = ServerLauncher.findRclone(rootDir);
                     String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
-                String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
-                    ServerLauncher.releaseCloudLock(rootDir, rclone, b2Target);
+                    String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
+                    ServerLauncher.forceReleaseCloudLock(rootDir, rclone, b2Target);
                     ServerLauncher.cancelRemoteStop(rootDir, rclone, b2Target);
                 }
                 appendConsoleLog("[UNLOCK] Cluster lock released successfully.");
@@ -2736,20 +2762,31 @@ public class ClusterGUI extends JFrame {
                 String endpoint = ServerLauncher.extractJsonString(json, "b2_endpoint");
                 String b2Target = ServerLauncher.getB2Remote(bucket, keyId, appKey, endpoint);
 
-                ServerLauncher.publishAdminUpdate(rootDir, rclone, b2Target);
-                appendConsoleLog("[CLOUD SYNC] Successfully published runtime configurations & plugins to B2!");
-                SwingUtilities.invokeLater(() -> {
-                    btn.setText("SYNCED!");
-                    JOptionPane.showMessageDialog(this,
-                            "Server configurations and plugins were published to the cloud successfully!\nAll co-hosts will automatically receive them on their next session.",
-                            "Cloud Sync Complete", JOptionPane.INFORMATION_MESSAGE);
-                    Timer t = new Timer(2000, ev -> {
-                        btn.setText("SYNC CONFIGS & PLUGINS");
-                        btn.setEnabled(true);
+                boolean published = ServerLauncher.publishAdminUpdate(rootDir, rclone, b2Target);
+                if (published) {
+                    appendConsoleLog("[CLOUD SYNC] Successfully published runtime configurations & plugins to B2!");
+                    SwingUtilities.invokeLater(() -> {
+                        btn.setText("SYNCED!");
+                        JOptionPane.showMessageDialog(this,
+                                "Server configurations and plugins were published to the cloud successfully!\nAll co-hosts will automatically receive them on their next session.",
+                                "Cloud Sync Complete", JOptionPane.INFORMATION_MESSAGE);
+                        Timer t = new Timer(2000, ev -> {
+                            btn.setText("SYNC CONFIGS & PLUGINS");
+                            btn.setEnabled(true);
+                        });
+                        t.setRepeats(false);
+                        t.start();
                     });
-                    t.setRepeats(false);
-                    t.start();
-                });
+                } else {
+                    appendConsoleLog("[ERROR] Cloud sync failed: Distribution copy or cloud manifest update rejected.");
+                    SwingUtilities.invokeLater(() -> {
+                        btn.setText("RETRY SYNC");
+                        btn.setEnabled(true);
+                        JOptionPane.showMessageDialog(this,
+                                "Failed to publish distribution to Backblaze B2.\nPlease verify network connectivity and cloud permissions.",
+                                "Cloud Sync Error", JOptionPane.ERROR_MESSAGE);
+                    });
+                }
             } catch (Exception ex) {
                 appendConsoleLog("[ERROR] Cloud sync failed: " + ex.getMessage());
                 SwingUtilities.invokeLater(() -> {

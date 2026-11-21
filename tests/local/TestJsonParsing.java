@@ -82,9 +82,128 @@ public class TestJsonParsing {
             failures++;
         }
 
+        // 3. Strict RFC 8259 Compliance Tests
+        // Trailing comma rejection in strict mode
+        boolean strictTrailingCommaFailed = false;
+        try {
+            MiniJson.parseObjectStrict("{\"key\":\"val\",}");
+        } catch (MiniJson.ParseException e) {
+            strictTrailingCommaFailed = true;
+        }
+        if (strictTrailingCommaFailed) {
+            System.out.println("  ✓ PASS: MiniJson.parseObjectStrict strictly rejects trailing comma in object");
+        } else {
+            System.err.println("  ✗ FAIL: MiniJson.parseObjectStrict accepted trailing comma!");
+            failures++;
+        }
+
+        // Invalid escape sequence rejection in strict mode
+        boolean strictEscapeFailed = false;
+        try {
+            MiniJson.parseObjectStrict("{\"key\":\"val\\x12\"}");
+        } catch (MiniJson.ParseException e) {
+            strictEscapeFailed = true;
+        }
+        if (strictEscapeFailed) {
+            System.out.println("  ✓ PASS: MiniJson.parseObjectStrict strictly rejects invalid escape sequence ('\\x')");
+        } else {
+            System.err.println("  ✗ FAIL: MiniJson.parseObjectStrict accepted invalid escape sequence!");
+            failures++;
+        }
+
+        // Lenient mode tolerates trailing commas
+        MiniJson.JsonObject lenientObj = MiniJson.parseObject("{\"key\":\"val\",}");
+        if (lenientObj != null && "val".equals(lenientObj.getString("key"))) {
+            System.out.println("  ✓ PASS: MiniJson.parseObject leniently tolerates trailing commas in configuration files");
+        } else {
+            System.err.println("  ✗ FAIL: MiniJson.parseObject failed on lenient trailing comma!");
+            failures++;
+        }
+
+        // 4. Strict mode rejects uppercase boolean literals (RFC 8259 §3)
+        boolean strictUppercaseBoolFailed = false;
+        try {
+            MiniJson.parseObjectStrict("{\"released\":TRUE}");
+        } catch (MiniJson.ParseException e) {
+            strictUppercaseBoolFailed = true;
+        }
+        if (strictUppercaseBoolFailed) {
+            System.out.println("  ✓ PASS: MiniJson.parseObjectStrict strictly rejects uppercase 'TRUE' literal");
+        } else {
+            System.err.println("  ✗ FAIL: MiniJson.parseObjectStrict accepted uppercase 'TRUE'!");
+            failures++;
+        }
+
+        // 5. Strict mode rejects leading-zero number (RFC 8259 §6)
+        boolean strictLeadingZeroFailed = false;
+        try {
+            MiniJson.parseObjectStrict("{\"generation\":026}");
+        } catch (MiniJson.ParseException e) {
+            strictLeadingZeroFailed = true;
+        }
+        if (strictLeadingZeroFailed) {
+            System.out.println("  ✓ PASS: MiniJson.parseObjectStrict strictly rejects leading-zero number (026)");
+        } else {
+            System.err.println("  ✗ FAIL: MiniJson.parseObjectStrict accepted leading-zero number 026!");
+            failures++;
+        }
+
+        // 6. Strict mode rejects bare minus with no digits
+        boolean strictBareMinus = false;
+        try {
+            MiniJson.parseObjectStrict("{\"gen\":-}");
+        } catch (MiniJson.ParseException e) {
+            strictBareMinus = true;
+        }
+        if (strictBareMinus) {
+            System.out.println("  ✓ PASS: MiniJson.parseObjectStrict strictly rejects bare '-' with no digits");
+        } else {
+            System.err.println("  ✗ FAIL: MiniJson.parseObjectStrict accepted bare '-'!");
+            failures++;
+        }
+
+        // 7. getStrictInt rejects fractional Double (e.g. generation: 26.5)
+        boolean strictIntFractional = false;
+        try {
+            MiniJson.JsonObject fracObj = MiniJson.parseObjectStrict("{\"generation\":26.5}");
+            fracObj.getStrictInt("generation");
+        } catch (MiniJson.ParseException e) {
+            strictIntFractional = true;
+        }
+        if (strictIntFractional) {
+            System.out.println("  ✓ PASS: JsonObject.getStrictInt() rejects fractional value 26.5 as ParseException");
+        } else {
+            System.err.println("  ✗ FAIL: JsonObject.getStrictInt() accepted fractional value 26.5!");
+            failures++;
+        }
+
+        // 8. getStrictInt rejects string field type
+        boolean strictIntString = false;
+        try {
+            MiniJson.JsonObject strObj = MiniJson.parseObjectStrict("{\"generation\":\"26\"}");
+            strObj.getStrictInt("generation");
+        } catch (MiniJson.ParseException e) {
+            strictIntString = true;
+        }
+        if (strictIntString) {
+            System.out.println("  ✓ PASS: JsonObject.getStrictInt() rejects string value \"26\" as ParseException");
+        } else {
+            System.err.println("  ✗ FAIL: JsonObject.getStrictInt() accepted string value \"26\"!");
+            failures++;
+        }
+
+        // 9. Lenient mode accepts uppercase TRUE
+        MiniJson.JsonObject lenientBool = MiniJson.parseObject("{\"released\":TRUE}");
+        if (lenientBool != null && lenientBool.getBoolean("released", false) == true) {
+            System.out.println("  ✓ PASS: MiniJson.parseObject (lenient) accepts uppercase 'TRUE' for config compatibility");
+        } else {
+            System.err.println("  ✗ FAIL: MiniJson.parseObject (lenient) failed on uppercase 'TRUE'!");
+            failures++;
+        }
+
         System.out.println("--------------------------------------------------------------------------------");
         if (failures == 0) {
-            System.out.println("[RESULT] ALL 9 JSON EXTRACTION ASSERTIONS PASSED.\n");
+            System.out.println("[RESULT] ALL JSON EXTRACTION ASSERTIONS PASSED.\n");
             System.exit(0);
         } else {
             System.err.printf("[RESULT] %d ASSERTIONS FAILED.\n\n", failures);
